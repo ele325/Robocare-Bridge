@@ -44,9 +44,9 @@ mqtt_handler.init(mqtt_client, db)
 
 # ── Démarrage ────────────────────────────────────────────────────────────────
 def main():
-    logger.info("═══════════════════════════════════════")
-    logger.info("  RoboCare Bridge v6.0  — démarrage")
-    logger.info("═══════════════════════════════════════")
+    
+    logger.info("  RoboCare Bridge  — démarrage")
+    
 
     try:
         mqtt_client.connect(cfg.MQTT_BROKER, cfg.MQTT_PORT)
