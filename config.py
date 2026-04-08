@@ -13,8 +13,8 @@ GROQ_TEMPERATURE = 0.3
 GROQ_MAX_RETRIES = 3
 
 # ── MQTT ────────────────────────────────────────────────────────────────────
-MQTT_BROKER     = "broker.hivemq.com"
-MQTT_PORT       = 1883
+MQTT_BROKER     = os.environ.get("MQTT_BROKER", "mosquitto-ddvp3ukurerox0bh4rpc9v9k")
+MQTT_PORT       = int(os.environ.get("MQTT_PORT", 1883))
 MQTT_TOPIC_DATA = "robocare/+/zone/+/data"
 
 # ── ML ──────────────────────────────────────────────────────────────────────
