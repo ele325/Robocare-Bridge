@@ -1,6 +1,16 @@
 # -*- coding: utf-8 -*-
 """
 mqtt_handler.py — Callbacks MQTT RoboCare v2.3
+Multi-capteurs par zone avec adresses fixes.
+
+Topic attendu : robocare/{uid}/zone/{zone_num}/sensor/{sensor_id}/data
+Index parts   :     [0]   [1]  [2]    [3]        [4]      [5]      [6]
+
+Principe de remplacement hardware :
+  Si le capteur à l'adresse "11" tombe en panne, l'agriculteur configure
+  le nouveau hardware avec l'adresse "11". Le serveur ne voit aucune
+  différence — le topic et le sensor_id sont identiques, les données
+  continuent d'arriver normalement.
 """
 
 import json
@@ -10,19 +20,19 @@ import threading
 from firebase_admin import firestore
 
 import config as cfg
-from services.firebase_service      import update_sensor_data
-from services.notification_service  import send_critical_alert, send_irrigation_prediction
-from services.chatbot_service       import handle_chatbot_async
-from ml.predictor                   import predict_stress_risk, predict_irrigation_combined
-from utils.logger                   import get_logger
+from services.firebase_service     import update_sensor_data, deactivate_sensor
+from services.notification_service import send_critical_alert, send_irrigation_prediction
+from services.chatbot_service      import handle_chatbot_async
+from ml.predictor                  import predict_stress_risk, predict_irrigation_combined
+from utils.logger                  import get_logger
 
 logger = get_logger("robocare.mqtt")
 
 # ── État interne ─────────────────────────────────────────────────────────────
-_command_watchers    : dict  = {}
-_zone_watchers       : dict  = {}
-_processed_msg_ids   : set   = set()
-_watcher_start_time  : float = time.time()
+_command_watchers   : dict  = {}
+_zone_watchers      : dict  = {}
+_processed_msg_ids  : set   = set()
+_watcher_start_time : float = time.time()
 
 mqtt_client = None
 db          = None
@@ -34,108 +44,198 @@ def init(client, firestore_db):
     db          = firestore_db
 
 
+# ── Surveillance des capteurs silencieux ──────────────────────────────────────
+
+def _stale_sensor_watcher(interval_seconds: int = 60):
+    """
+    Thread daemon — tourne en arrière-plan toutes les `interval_seconds`.
+
+    Pour chaque capteur dont le dernier message dépasse SENSOR_STALE_SECONDS :
+      → publie "offline" sur le topic de statut MQTT
+      → appelle deactivate_sensor() pour l'exclure des moyennes
+
+    Dès que le hardware de remplacement (même adresse) envoie son premier
+    message, update_sensor_data() remet active=True automatiquement.
+    Aucune intervention supplémentaire n'est nécessaire.
+    """
+    if not cfg.SENSOR_STALE_SECONDS:
+        logger.info("Surveillance capteurs silencieux désactivée (SENSOR_STALE_SECONDS=None)")
+        return
+
+    logger.info(
+        "Thread surveillance capteurs démarré (vérif. toutes %ds, seuil=%ds)",
+        interval_seconds, cfg.SENSOR_STALE_SECONDS,
+    )
+
+    while True:
+        time.sleep(interval_seconds)
+        try:
+            users = db.collection("users").get()
+            for user_doc in users:
+                uid   = user_doc.id
+                zones = (
+                    db.collection("users").document(uid)
+                      .collection("zones").get()
+                )
+                for zone_doc in zones:
+                    zone_num = zone_doc.id.replace("zone", "")
+                    _check_stale_sensors_in_zone(uid, zone_num)
+        except Exception as exc:
+            logger.error("Erreur thread surveillance : %s", exc)
+
+
+def _check_stale_sensors_in_zone(uid: str, zone_num: str) -> None:
+    """
+    Vérifie tous les capteurs d'une zone et désactive ceux qui sont silencieux.
+    """
+    now = time.time()
+    try:
+        sensor_docs = (
+            db.collection("users").document(uid)
+              .collection("zones").document(f"zone{zone_num}")
+              .collection("sensors")
+              .where("active", "==", True)
+              .get()
+        )
+        for doc in sensor_docs:
+            data = doc.to_dict()
+            if not data:
+                continue
+
+            ts = data.get("timestamp")
+            if ts is None:
+                continue
+
+            if hasattr(ts, "timestamp"):
+                last_seen = ts.timestamp()
+            elif hasattr(ts, "_seconds"):
+                last_seen = ts._seconds
+            else:
+                continue
+
+            age = now - last_seen
+            if age > cfg.SENSOR_STALE_SECONDS:
+                sensor_id = doc.id
+                logger.warning(
+                    "Zone %s | Capteur %s silencieux depuis %.0fs → désactivé",
+                    zone_num, sensor_id, age,
+                )
+                # Marquer inactif → exclu des moyennes
+                deactivate_sensor(db, uid, zone_num, sensor_id)
+                # Notifier via MQTT
+                mqtt_client.publish(
+                    f"robocare/{uid}/zone/{zone_num}/sensor/{sensor_id}/status",
+                    "offline",
+                    qos=1,
+                    retain=True,
+                )
+
+    except Exception as exc:
+        logger.error(
+            "Erreur vérification capteurs zone %s : %s", zone_num, exc
+        )
+
+
+def start_stale_watcher(interval_seconds: int = 60) -> None:
+    """Démarre le thread de surveillance (une seule fois)."""
+    t = threading.Thread(
+        target=_stale_sensor_watcher,
+        args=(interval_seconds,),
+        daemon=True,
+        name="stale-sensor-watcher",
+    )
+    t.start()
+
+
 # ── Lecture des seuils depuis Firebase ───────────────────────────────────────
 
-def _get_zone_thresholds(uid: str, zone_num: str) -> dict:
+def _get_zone_config(uid: str, zone_num: str) -> dict:
     """
-    Lit les seuils configurés par l'agriculteur pour une zone.
-    Retourne les valeurs par défaut si pas encore configurés.
+    Lit la config complète d'une zone depuis Firestore :
+    seuils + identité métier (plante, stade, nom).
+    Les constantes système (HUMIDITY_ALERT, etc.) restent dans config.py.
     """
-    try:
-        doc = db.collection('users') \
-                .document(uid) \
-                .collection('zones') \
-                .document(f'zone{zone_num}') \
-                .collection('config') \
-                .document('thresholds') \
-                .get()
-
-        if doc.exists:
-            data = doc.to_dict()
-            return {
-                'minHumidity': data.get('minHumidity', cfg.HUMIDITY_ALERT),
-                'maxHumidity': data.get('maxHumidity', 70.0),
-                'duration':    data.get('duration', 15),
-            }
-    except Exception as e:
-        logger.error("Erreur lecture seuils zone %s : %s", zone_num, e)
-
-    # Valeurs par défaut si pas encore configurés
-    return {
-        'minHumidity': cfg.HUMIDITY_ALERT,
-        'maxHumidity': 70.0,
-        'duration':    15,
+    defaults = {
+        "minHumidity": cfg.HUMIDITY_ALERT,
+        "maxHumidity": 70.0,
+        "duration":    15,
+        "zone_name":   f"Zone {zone_num}",
+        "plant_type":  None,
+        "crop_stage":  None,
     }
-
+    try:
+        doc = (
+            db.collection("users").document(uid)
+              .collection("zones").document(f"zone{zone_num}")
+              .get()
+        )
+        if doc.exists:
+            d = doc.to_dict()
+            defaults.update({
+                "minHumidity": d.get("minHumidity", defaults["minHumidity"]),
+                "maxHumidity": d.get("maxHumidity", defaults["maxHumidity"]),
+                "duration":    d.get("duration",    defaults["duration"]),
+                "zone_name":   d.get("zone_name",   defaults["zone_name"]),
+                "plant_type":  d.get("plant_type"),
+                "crop_stage":  d.get("crop_stage"),
+            })
+    except Exception as exc:
+        logger.error("Erreur lecture config zone %s : %s", zone_num, exc)
+    return defaults
 
 # ── Contrôle automatique de la vanne ─────────────────────────────────────────
 
-def _control_valve_auto(uid: str, zone_num: str, humidity: float):
+def _control_valve_auto(uid: str, zone_num: str, humidity: float) -> None:
     """
-    Ouvre ou ferme la vanne automatiquement selon les seuils
-    configurés par l'agriculteur.
+    Ouvre ou ferme la vanne selon les seuils configurés.
+    `humidity` est la moyenne agrégée des capteurs actifs de la zone.
     """
-    thresholds   = _get_zone_thresholds(uid, zone_num)
-    min_humidity = thresholds['minHumidity']
-    max_humidity = thresholds['maxHumidity']
-    duration     = thresholds['duration']
-
-    topic_valve = "robocare/{}/valve/control/{}".format(uid, zone_num)
+    thresholds = _get_zone_config(uid, zone_num)   
+    min_humidity = thresholds["minHumidity"]
+    max_humidity = thresholds["maxHumidity"]
+    duration     = thresholds["duration"]
+    topic_valve  = f"robocare/{uid}/valve/control/{zone_num}"
 
     if humidity < min_humidity:
-        # 💧 Humidité trop basse → Ouvrir la vanne
         logger.info(
-            "Zone %s | Humidité %.1f%% < seuil min %.1f%% → Vanne OUVERTE",
-            zone_num, humidity, min_humidity
+            "Zone %s | H moy. %.1f%% < min %.1f%% → Vanne OUVERTE",
+            zone_num, humidity, min_humidity,
         )
         mqtt_client.publish(topic_valve, "1", qos=1)
+        db.collection("users").document(uid) \
+          .collection("zones").document(f"zone{zone_num}") \
+          .update({"enabled": True})
 
-        # Mettre à jour l'état dans Firestore
-        db.collection('users') \
-          .document(uid) \
-          .collection('zones') \
-          .document(f'zone{zone_num}') \
-          .update({'enabled': True})
-
-        # Fermer automatiquement après la durée configurée
         def auto_close():
             time.sleep(duration * 60)
-            # Vérifier l'humidité actuelle avant de fermer
-            zone_doc = db.collection('users') \
-                         .document(uid) \
-                         .collection('zones') \
-                         .document(f'zone{zone_num}') \
-                         .get()
+            zone_doc = (
+                db.collection("users").document(uid)
+                  .collection("zones").document(f"zone{zone_num}")
+                  .get()
+            )
             if zone_doc.exists:
-                current_humidity = zone_doc.to_dict().get('humidity', 0)
-                if current_humidity >= max_humidity:
+                current_h = zone_doc.to_dict().get("humidity", 0)
+                if current_h >= max_humidity:
                     logger.info(
-                        "Zone %s | Humidité %.1f%% ≥ seuil max %.1f%% → Vanne FERMÉE (auto)",
-                        zone_num, current_humidity, max_humidity
+                        "Zone %s | H moy. %.1f%% ≥ max %.1f%% → Vanne FERMÉE (auto)",
+                        zone_num, current_h, max_humidity,
                     )
                     mqtt_client.publish(topic_valve, "0", qos=1)
-                    db.collection('users') \
-                      .document(uid) \
-                      .collection('zones') \
-                      .document(f'zone{zone_num}') \
-                      .update({'enabled': False})
+                    db.collection("users").document(uid) \
+                      .collection("zones").document(f"zone{zone_num}") \
+                      .update({"enabled": False})
 
         threading.Thread(target=auto_close, daemon=True).start()
 
     elif humidity >= max_humidity:
-        # 🔒 Humidité suffisante → Fermer la vanne
         logger.info(
-            "Zone %s | Humidité %.1f%% ≥ seuil max %.1f%% → Vanne FERMÉE",
-            zone_num, humidity, max_humidity
+            "Zone %s | H moy. %.1f%% ≥ max %.1f%% → Vanne FERMÉE",
+            zone_num, humidity, max_humidity,
         )
         mqtt_client.publish(topic_valve, "0", qos=1)
-
-        # Mettre à jour l'état dans Firestore
-        db.collection('users') \
-          .document(uid) \
-          .collection('zones') \
-          .document(f'zone{zone_num}') \
-          .update({'enabled': False})
+        db.collection("users").document(uid) \
+          .collection("zones").document(f"zone{zone_num}") \
+          .update({"enabled": False})
 
 
 # ── Callbacks MQTT ───────────────────────────────────────────────────────────
@@ -150,61 +250,108 @@ def on_connect(client, userdata, flags, reason_code, properties):
 
 
 def on_message(client, userdata, msg):
+    """
+    Callback principal.
+
+    Topic : robocare/{uid}/zone/{zone_num}/sensor/{sensor_id}/data
+    parts :     [0]   [1]  [2]    [3]        [4]      [5]      [6]
+
+    Remplacement hardware transparent :
+      Le capteur à l'adresse "11" tombe en panne → l'agriculteur configure
+      le nouveau capteur avec l'adresse "11" → ce callback reçoit exactement
+      le même topic → update_sensor_data() écrase les données au même
+      endroit Firestore → active passe automatiquement à True.
+      Aucune modification serveur requise.
+    """
     try:
-        # ── Discovery ────────────────────────────────────────────────────
+        # ── Discovery ────────────────────────────────────────────────────────
         if msg.topic == "robocare/discovery":
             _handle_discovery(msg)
             return
 
-        # ── Données capteur ───────────────────────────────────────────────
+        # ── Décodage du topic ─────────────────────────────────────────────────
         parts = msg.topic.split("/")
-        if len(parts) < 5:
-            logger.warning("Topic inattendu (< 5 parts) : %s", msg.topic)
+        if len(parts) < 7:
+            logger.warning(
+                "Topic inattendu (attendu ≥ 7 parts, reçu %d) : %s",
+                len(parts), msg.topic,
+            )
             return
 
-        uid      = parts[1]
-        zone_num = parts[3]
-        payload  = json.loads(msg.payload.decode("utf-8"))
+        uid       = parts[1]
+        zone_num  = parts[3]   # adresse fixe de la zone  (ex. "1")
+        sensor_id = parts[5]   # adresse fixe du capteur  (ex. "11")
 
-        logger.info("← MQTT Zone %s | UID: %s", zone_num, uid)
+        payload = json.loads(msg.payload.decode("utf-8"))
+        logger.info(
+            "← MQTT Zone %s | Capteur %s | UID: %s",
+            zone_num, sensor_id, uid,
+        )
         logger.debug("  Payload : %s", payload)
 
-        humidity, temperature, ec, n, p, k = update_sensor_data(
-            db, uid, zone_num, payload
-        )
-        if humidity is None:
+        # ── Mise à jour Firebase + calcul moyenne zone ────────────────────────
+        result = update_sensor_data(db, uid, zone_num, payload, sensor_id)
+        if result[0] is None:
             return
 
-        # ── Contrôle automatique de la vanne selon seuils agriculteur ────
+        humidity, temperature, ph, ec, n, p, k = result
+
+        # ── Métadonnées réseau ────────────────────────────────────────────────
+        meta = payload.get("meta", {})
+        if meta:
+            try:
+                db.collection("users").document(uid) \
+                  .collection("zones").document(f"zone{zone_num}") \
+                  .collection("signal") \
+                  .add({
+                      "sensor_id": sensor_id,
+                      "node_id":   meta.get("node_id"),
+                      "mac":       meta.get("mac"),
+                      "rssi":      meta.get("rssi"),
+                      "snr":       meta.get("snr"),
+                      "timestamp": firestore.SERVER_TIMESTAMP,
+                  })
+                logger.info(
+                    "Zone %s | Capteur %s | MAC: %s | RSSI: %d dBm | SNR: %.1f",
+                    zone_num, sensor_id,
+                    meta.get("mac"), meta.get("rssi", 0), meta.get("snr", 0),
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Erreur sauvegarde métadonnées zone %s / capteur %s : %s",
+                    zone_num, sensor_id, exc,
+                )
+
+        # ── Contrôle automatique de la vanne ─────────────────────────────────
         _control_valve_auto(uid, zone_num, humidity)
 
-        # ── Alerte critique immédiate ─────────────────────────────────────
+        # ── Alerte critique ───────────────────────────────────────────────────
         if humidity < cfg.HUMIDITY_ALERT:
             send_critical_alert(db, uid, zone_num, humidity)
 
-        # ── Stress hydrique ───────────────────────────────────────────────
+        # ── Stress hydrique ───────────────────────────────────────────────────
         if predict_stress_risk(db, uid, zone_num, humidity):
             logger.warning("Stress hydrique prédit — Zone %s", zone_num)
 
-        # ── ML combinée ───────────────────────────────────────────────────
-        result = predict_irrigation_combined(
+        # ── ML combinée ───────────────────────────────────────────────────────
+        ml_result = predict_irrigation_combined(
             db, uid, zone_num, humidity, temperature, ec, n, p, k
         )
 
-        # ── Historique Firestore ──────────────────────────────────────────
-        db.collection("users") \
-          .document(uid) \
-          .collection("zones") \
-          .document("zone{}".format(zone_num)) \
+        # ── Historique Firestore ──────────────────────────────────────────────
+        db.collection("users").document(uid) \
+          .collection("zones").document(f"zone{zone_num}") \
           .collection("history") \
-          .add(result.to_firestore_dict())
+          .add(ml_result.to_firestore_dict())
 
-        if result.is_dangerous:
-            send_irrigation_prediction(db, uid, zone_num, result)
+        if ml_result.is_dangerous:
+            send_irrigation_prediction(db, uid, zone_num, ml_result)
 
     except Exception as exc:
         logger.exception("Erreur on_message : %s", exc)
 
+
+# ── Gestion discovery ─────────────────────────────────────────────────────────
 
 def _handle_discovery(msg):
     try:
@@ -223,9 +370,8 @@ def _handle_discovery(msg):
             doc_data = doc_snap.to_dict()
             status   = doc_data.get("status", "waiting")
             uid      = doc_data.get("uid", "")
-
             if status == "claimed" and uid:
-                config_topic = "robocare/config/{}".format(mac)
+                config_topic = f"robocare/config/{mac}"
                 mqtt_client.publish(config_topic, uid, qos=1, retain=True)
                 logger.info("Device connu → UID envoyé : %s → %s", mac, uid)
                 return
@@ -244,7 +390,7 @@ def _handle_discovery(msg):
         logger.error("Erreur _handle_discovery : %s", exc)
 
 
-# ── Listeners Firestore ──────────────────────────────────────────────────────
+# ── Listeners Firestore ───────────────────────────────────────────────────────
 
 def _on_variateur_snapshot(uid, doc_snapshot, changes, read_time):
     for doc in doc_snapshot:
@@ -255,31 +401,50 @@ def _on_variateur_snapshot(uid, doc_snapshot, changes, read_time):
         freq  = int(data.get("frequency", 0))
 
         mqtt_client.publish(
-            "robocare/{}/pump/control".format(uid),
+            f"robocare/{uid}/pump/control",
             "1" if is_on else "0",
             qos=1,
         )
         if freq > 0:
             mqtt_client.publish(
-                "robocare/{}/pump/frequency".format(uid),
+                f"robocare/{uid}/pump/frequency",
                 str(freq),
                 qos=1,
             )
 
 
 def _on_zones_snapshot(uid, col_snapshot, changes, read_time):
+    """
+    Écoute les changements sur la collection zones/.
+    La suppression d'une zone n'affecte pas les autres zones
+    (elles conservent leurs numéros).
+    """
     for change in changes:
         if change.type.name in ("ADDED", "MODIFIED"):
             doc      = change.document
-            data     = doc.to_dict()
+            data     = doc.to_dict() or {}
             enabled  = bool(data.get("enabled", False))
-            zone_num = str(data.get("zone_num",
-                           doc.id.replace("zone", "")))
+            zone_num = doc.id.replace("zone", "")
 
             mqtt_client.publish(
-                "robocare/{}/valve/control/{}".format(uid, zone_num),
+                f"robocare/{uid}/valve/control/{zone_num}",
                 "1" if enabled else "0",
                 qos=1,
+            )
+
+        elif change.type.name == "REMOVED":
+            # Zone supprimée — les autres zones ne changent PAS de numéro
+            zone_num = change.document.id.replace("zone", "")
+            logger.info(
+                "Zone %s supprimée pour UID %s — autres zones inchangées",
+                zone_num, uid,
+            )
+            # Fermer la vanne de cette zone par sécurité
+            mqtt_client.publish(
+                f"robocare/{uid}/valve/control/{zone_num}",
+                "0",
+                qos=1,
+                retain=True,
             )
 
 
@@ -326,6 +491,8 @@ def on_msg_snapshot(col_snap, changes, read_time):
             handle_chatbot_async(db, uid, chat_id, data.get("text", ""))
 
 
+# ── Démarrage des watchers ────────────────────────────────────────────────────
+
 def start_command_listener(uid: str) -> None:
     if uid not in _command_watchers:
         ref = (
@@ -370,10 +537,11 @@ def start_all_watchers() -> None:
             uid    = d.get("uid", "")
 
             if status == "claimed" and mac and uid:
-                config_topic = "robocare/config/{}".format(mac)
+                config_topic = f"robocare/config/{mac}"
                 mqtt_client.publish(config_topic, uid, qos=1, retain=True)
-                logger.info("Device claimed → UID publié : %s → topic %s",
-                            uid, config_topic)
+                logger.info(
+                    "Device claimed → UID publié : %s → topic %s", uid, config_topic
+                )
                 start_command_listener(uid)
 
     db.collection("pending_devices").on_snapshot(on_pending)
