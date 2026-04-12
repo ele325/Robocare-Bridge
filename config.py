@@ -4,6 +4,7 @@ config.py — Centralisation de toutes les constantes RoboCare
 """
 
 import os
+from xmlrpc import client
 
 # ── Groq ────────────────────────────────────────────────────────────────────
 GROQ_API_KEY     = os.environ.get("GROQ_API_KEY", "")
@@ -15,6 +16,8 @@ GROQ_MAX_RETRIES = 3
 # ── MQTT ────────────────────────────────────────────────────────────────────
 MQTT_BROKER     = os.environ.get("MQTT_BROKER", "mosquitto-ddvp3ukurerox0bh4rpc9v9k")
 MQTT_PORT       = int(os.environ.get("MQTT_PORT", 1883))
+# Dans ton code de connexion (souvent main.py ou services/mqtt_service.py)
+client.username_pw_set("root", "hLXvfCb6YCOibvxj")
 MQTT_TOPIC_DATA = "robocare/+/zone/+/sensor/+/data"
 
 # ── ML ──────────────────────────────────────────────────────────────────────
