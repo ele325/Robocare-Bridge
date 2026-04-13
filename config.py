@@ -14,12 +14,11 @@ GROQ_TEMPERATURE = 0.3
 GROQ_MAX_RETRIES = 3
 
 # ── MQTT ────────────────────────────────────────────────────────────────────
-MQTT_BROKER     = os.environ.get("MQTT_BROKER", "mosquitto-ddvp3ukurerox0bh4rpc9v9k")
-MQTT_PORT       = int(os.environ.get("MQTT_PORT", 1883))
-# Dans ton code de connexion (souvent main.py ou services/mqtt_service.py)
-client.username_pw_set("root", "hLXvfCb6YCOibvxj")
+MQTT_BROKER   = os.environ.get("MQTT_BROKER", "mosquitto-ddvp3ukurerox0bh4rpc9v9k")
+MQTT_PORT     = int(os.environ.get("MQTT_PORT", 1883))
+MQTT_USER     = "root"
+MQTT_PASSWORD = "hLXvfCb6YCOibvxj"
 MQTT_TOPIC_DATA = "robocare/+/zone/+/sensor/+/data"
-
 # ── ML ──────────────────────────────────────────────────────────────────────
 ML_HISTORY_LIMIT        = 30   # nb relevés pour régression
 ML_MIN_HISTORY          = 10   # minimum requis
