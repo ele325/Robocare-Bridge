@@ -4,7 +4,6 @@ config.py — Centralisation de toutes les constantes RoboCare
 """
 
 import os
-from xmlrpc import client
 
 # ── Groq ────────────────────────────────────────────────────────────────────
 GROQ_API_KEY     = os.environ.get("GROQ_API_KEY", "")
