@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-services/chatbot_service.py — Chatbot IA multilingue RoboCare (Groq / LLaMA)
+services/chatbot_service.py — Chatbot IA multilingue RoboCare
+Correction v6.1 : champs n/p/k harmonisés + sante valeur par défaut 0
 """
 
 import time
@@ -12,7 +13,6 @@ from firebase_admin import firestore
 
 import config as cfg
 from utils.logger import get_logger
-from utils.decorators import retry
 
 logger = get_logger("robocare.services.chatbot")
 
@@ -63,7 +63,6 @@ _SYSTEM_PROMPTS = {
 
 
 def detect_language(text: str) -> tuple[str, str]:
-    """Retourne (code_langue, nom_langue). Priorité : ar > fr > en."""
     if any("\u0600" <= c <= "\u06FF" for c in text):
         return "ar", "Arabic"
     if any(w in text.lower().split() for w in _FR_WORDS):
@@ -76,7 +75,6 @@ def detect_language(text: str) -> tuple[str, str]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _call_groq(prompt: str, system_prompt: str) -> str | None:
-    """Appelle l'API Groq avec retry sur quota."""
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user",   "content": prompt},
@@ -98,7 +96,10 @@ def _call_groq(prompt: str, system_prompt: str) -> str | None:
                 match = re.search(r"retry[^\d]*(\d+)", err)
                 if match:
                     wait = int(match.group(1)) + 2
-                logger.warning("Quota Groq — attente %ds (tentative %d/%d)", wait, attempt + 1, cfg.GROQ_MAX_RETRIES)
+                logger.warning(
+                    "Quota Groq — attente %ds (tentative %d/%d)",
+                    wait, attempt + 1, cfg.GROQ_MAX_RETRIES,
+                )
                 time.sleep(wait)
             else:
                 logger.error("Erreur Groq : %s", exc)
@@ -111,41 +112,42 @@ def _call_groq(prompt: str, system_prompt: str) -> str | None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def handle_chatbot_logic(db, uid: str, chat_id: str, user_message: str) -> None:
-    """Répond au message utilisateur en détectant la langue et en interrogeant Groq."""
     time.sleep(0.5)
     try:
         lang_code, lang_name = detect_language(user_message)
         logger.info("Langue détectée : %s pour → '%s'", lang_name, user_message)
 
         # Contexte capteurs
-        zones_ref    = db.collection("users").document(uid).collection("zones").get()
-        context_lines = [
-            "- {}: humidity={}%, pH={}, EC={} uS/cm, N={}, P={}, K={}, health={}/10".format(
-                z.id,
-                d := z.to_dict(),
-                d.get("humidity"), d.get("ph"), d.get("ec"),
-                d.get("azote"), d.get("phosphore"), d.get("potassium"), d.get("sante"),
-            )
-            for z in zones_ref
-        ]
-        # Note: reformulation propre
+        zones_ref = db.collection("users").document(uid).collection("zones").get()
+
         lines = []
         for z in zones_ref:
             d = z.to_dict()
+            # ── CORRECTION v6.1 : champs n/p/k + sante avec valeur par défaut 0
             lines.append(
-                "- {}: humidity={}%, pH={}, EC={} uS/cm, N={}, P={}, K={}, health={}/10".format(
-                    z.id, d.get("humidity"), d.get("ph"), d.get("ec"),
-                    d.get("azote"), d.get("phosphore"), d.get("potassium"), d.get("sante"),
+                "- {}: humidity={}%, pH={}, EC={} uS/cm, "
+                "N={}, P={}, K={}, health={}/10".format(
+                    z.id,
+                    d.get("humidity",    "--"),
+                    d.get("ph",          "--"),
+                    d.get("ec",          "--"),
+                    d.get("n",           "--"),   # corrigé : était azote
+                    d.get("p",           "--"),   # corrigé : était phosphore
+                    d.get("k",           "--"),   # corrigé : était potassium
+                    d.get("sante",       0),      # corrigé : valeur par défaut 0
                 )
             )
+
         context = "\n".join(lines) if lines else "No sensor data available."
 
-        user_prompt = "Current sensor data:\n{}\n\nUser question: {}".format(context, user_message)
-        reply       = _call_groq(user_prompt, _SYSTEM_PROMPTS[lang_code])
+        user_prompt = "Current sensor data:\n{}\n\nUser question: {}".format(
+            context, user_message
+        )
+        reply = _call_groq(user_prompt, _SYSTEM_PROMPTS[lang_code])
 
         if reply and len(reply.strip()) > 2:
-            db.collection("users").document(uid)\
-              .collection("chats").document(chat_id)\
+            db.collection("users").document(uid) \
+              .collection("chats").document(chat_id) \
               .collection("messages").add({
                   "text":      reply.strip(),
                   "sender":    "ai",
@@ -160,7 +162,6 @@ def handle_chatbot_logic(db, uid: str, chat_id: str, user_message: str) -> None:
 
 
 def handle_chatbot_async(db, uid: str, chat_id: str, user_message: str) -> None:
-    """Lance handle_chatbot_logic dans un thread daemon."""
     threading.Thread(
         target=handle_chatbot_logic,
         args=(db, uid, chat_id, user_message),

@@ -238,20 +238,20 @@ def predict_irrigation_combined(
         records = [d.to_dict() for d in history]
         records.reverse()
 
-        raw_h  = np.array([r.get("humidity",    current_humidity) for r in records], dtype=float)
-        raw_t  = np.array([r.get("temperature", current_temp)     for r in records], dtype=float)
-        raw_ec = np.array([r.get("ec",          current_ec)       for r in records], dtype=float)
-        raw_n  = np.array([r.get("azote",       current_n)        for r in records], dtype=float)
-        raw_p  = np.array([r.get("phosphore",   current_p)        for r in records], dtype=float)
-        raw_k  = np.array([r.get("potassium",   current_k)        for r in records], dtype=float)
-
+        raw_n  = np.array([r.get("n", current_n) for r in records], dtype=float)
+        raw_p  = np.array([r.get("p", current_p) for r in records], dtype=float)
+        raw_k  = np.array([r.get("k", current_k) for r in records], dtype=float)    
+        raw_h  = np.array([r.get("humidity", current_humidity) for r in records], dtype=float)
+        raw_t = np.array([r.get("temperature", current_temp) for r in records], dtype=float)
+        raw_ec = np.array([r.get("ec", current_ec) for r in records], dtype=float)
+        
         # 3. Détection d'anomalies
         rep_h  = detect_anomalies(raw_h,  "humidity")
         rep_t  = detect_anomalies(raw_t,  "temperature")
         rep_ec = detect_anomalies(raw_ec, "ec")
-        rep_n  = detect_anomalies(raw_n,  "azote")
-        rep_p  = detect_anomalies(raw_p,  "phosphore")
-        rep_k  = detect_anomalies(raw_k,  "potassium")
+        rep_n  = detect_anomalies(raw_n, "n")
+        rep_p  = detect_anomalies(raw_p, "p")
+        rep_k  = detect_anomalies(raw_k, "k")
 
         anomaly_reports = [r for r in [rep_h, rep_t, rep_ec, rep_n, rep_p, rep_k] if r.has_anomalies]
 
