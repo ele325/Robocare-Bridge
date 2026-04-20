@@ -40,8 +40,8 @@ mqtt_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
 mqtt_client.on_connect = mqtt_handler.on_connect
 mqtt_client.on_message = mqtt_handler.on_message
 mqtt_client.username_pw_set(cfg.MQTT_USER, cfg.MQTT_PASSWORD)
-mqtt_client.connect(cfg.MQTT_BROKER, cfg.MQTT_PORT)
 mqtt_handler.init(mqtt_client, db)
+# ↑ SUPPRIMÉ : mqtt_client.connect() ici — il sera appelé une seule fois dans main()
 
 
 # ── Démarrage ────────────────────────────────────────────────────────────────
@@ -53,7 +53,7 @@ def main():
     )
 
     try:
-        mqtt_client.connect(cfg.MQTT_BROKER, cfg.MQTT_PORT)
+        mqtt_client.connect(cfg.MQTT_BROKER, cfg.MQTT_PORT)  # ← une seule fois ici
 
         # Watchers Firestore
         threading.Thread(
@@ -62,10 +62,6 @@ def main():
             name="firestore-watchers",
         ).start()
 
-        # Surveillance des capteurs silencieux
-        # Toutes les 60s, vérifie si un capteur n'a pas donné signe de vie
-        # depuis SENSOR_STALE_SECONDS. Si oui → active=False jusqu'au
-        # prochain message (remplacement hardware transparent).
         mqtt_handler.start_stale_watcher(interval_seconds=60)
 
         logger.info(
