@@ -13,10 +13,10 @@ GROQ_TEMPERATURE = 0.3
 GROQ_MAX_RETRIES = 3
 
 # ── MQTT ────────────────────────────────────────────────────────────────────
-MQTT_BROKER   = os.environ.get("MQTT_BROKER", "mosquitto-ddvp3ukurerox0bh4rpc9v9k")
+MQTT_BROKER = os.environ.get("MQTT_BROKER", "80.75.212.179")
 MQTT_PORT     = int(os.environ.get("MQTT_PORT", 1883))
 MQTT_USER     = "root"
-MQTT_PASSWORD = "hLXvfCb6YCOibvxj"
+MQTT_PASSWORD = "A6k0tYRThA7UjNNH"
 MQTT_TOPIC_DATA = "robocare/+/zone/+/sensor/+/data"
 # ── ML ──────────────────────────────────────────────────────────────────────
 ML_HISTORY_LIMIT        = 30   # nb relevés pour régression

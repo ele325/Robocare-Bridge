@@ -76,6 +76,11 @@ class PredictionResult:
             "type":            "irrigation_combined",
             "score":           self.score,
             "raison":          self.reason,
+            # ── Champs lus par l'app Flutter dans humidityHistory ──
+            "humidity":        self.pred_humidity,
+            "temperature":     self.pred_temp,
+            "ec":              self.pred_ec,
+            # ── Prédictions ──
             "pred_humidity":   self.pred_humidity,
             "pred_temp":       self.pred_temp,
             "pred_ec":         self.pred_ec,
@@ -94,7 +99,6 @@ class PredictionResult:
             "n_anomalies":     sum(a.n_anomalies for a in self.anomalies),
             "timestamp":       firestore.SERVER_TIMESTAMP,
         }
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Fonctions utilitaires
@@ -221,7 +225,7 @@ def predict_irrigation_combined(
         history = (
             db.collection("users").document(uid)
               .collection("zones").document(zone_id)
-              .collection("history")
+              .collection("measures") 
               .order_by("timestamp", direction=firestore.Query.DESCENDING)
               .limit(cfg.ML_HISTORY_LIMIT)
               .get()
@@ -391,7 +395,7 @@ def predict_stress_risk(db, uid: str, zone_num: str | int, current_humidity: flo
         history = (
             db.collection("users").document(uid)
               .collection("zones").document(zone_id)
-              .collection("history")
+              .collection("measures") 
               .order_by("timestamp", direction=firestore.Query.DESCENDING)
               .limit(cfg.ML_STRESS_HISTORY_LIMIT)
               .get()
