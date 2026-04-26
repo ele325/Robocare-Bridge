@@ -106,96 +106,72 @@ class PredictionResult:
 
 def detect_anomalies(values: np.ndarray, variable: str) -> AnomalyReport:
     """
-    Détecte les valeurs aberrantes via Z-score.
-
-    Un relevé est considéré anomalie si |z| > cfg.ML_ZSCORE_THRESHOLD (défaut 2.5).
-    Les anomalies sont remplacées par la médiane pour ne pas biaiser la régression.
+    Détection améliorée des anomalies :
+    - Z-score pour détecter
+    - analyse du nombre et de la répétition
     """
+
     if len(values) < 4:
         return AnomalyReport(variable, 0, [], values.copy())
 
-    z_scores        = np.abs(stats.zscore(values))
+    z_scores = np.abs(stats.zscore(values))
     anomaly_indices = list(np.where(z_scores > cfg.ML_ZSCORE_THRESHOLD)[0])
 
     cleaned = values.copy()
-    if anomaly_indices:
-        median = float(np.median(values))
-        for idx in anomaly_indices:
-            cleaned[idx] = median
-        logger.warning(
-            "[ANOMALIE] %s : %d valeur(s) aberrante(s) aux indices %s → remplacées par médiane %.2f",
-            variable, len(anomaly_indices), anomaly_indices, median,
+
+    if not anomaly_indices:
+        return AnomalyReport(variable, 0, [], cleaned)
+
+    median = float(np.median(values))
+    n_anomalies = len(anomaly_indices)
+
+    # 🔍 Vérifier si anomalies consécutives
+    consecutive = False
+    for i in range(1, n_anomalies):
+        if anomaly_indices[i] == anomaly_indices[i-1] + 1:
+            consecutive = True
+            break
+
+    # 📊 Ratio anomalies
+    ratio = n_anomalies / len(values)
+
+    # ─────────────────────────────────────────
+    # CAS 1 : anomalie isolée
+    # ─────────────────────────────────────────
+    if n_anomalies == 1:
+        idx = anomaly_indices[0]
+        cleaned[idx] = median
+
+        logger.info(
+            "[ANOMALIE] %s : valeur inhabituelle (indice %d) → possible phénomène réel",
+            variable, idx
         )
 
-    return AnomalyReport(variable, len(anomaly_indices), anomaly_indices, cleaned)
+    # ─────────────────────────────────────────
+    # CAS 2 : anomalies répétées (capteur suspect)
+    # ─────────────────────────────────────────
+    elif consecutive or ratio > 0.2:
+        for idx in anomaly_indices:
+            cleaned[idx] = median
 
+        logger.warning(
+            "[ANOMALIE CRITIQUE] %s : %d anomalies répétées → capteur suspect",
+            variable, n_anomalies
+        )
 
-def _build_model() -> make_pipeline:
-    """Construit le pipeline : PolynomialFeatures(deg=2) + Ridge."""
-    return make_pipeline(
-        PolynomialFeatures(degree=cfg.ML_POLY_DEGREE, include_bias=False),
-        Ridge(alpha=cfg.ML_RIDGE_ALPHA),
-    )
+    # ─────────────────────────────────────────
+    # CAS 3 : anomalies dispersées
+    # ─────────────────────────────────────────
+    else:
+        for idx in anomaly_indices:
+            cleaned[idx] = median
 
+        logger.info(
+            "[ANOMALIE] %s : anomalies ponctuelles (%d) → surveillance recommandée",
+            variable, n_anomalies
+        )
 
-def _fit_predict(
-    X: np.ndarray,
-    y: np.ndarray,
-    next_idx: int,
-) -> Tuple[float, float, float]:
-    """
-    Ajuste un modèle polynomial Ridge et prédit l'indice next_idx.
-
-    Retourne (valeur_prédite, tendance_linéaire, r2_score)
-    """
-    model = _build_model()
-    model.fit(X, y)
-
-    pred       = float(model.predict([[next_idx]])[0])
-    r2         = float(r2_score(y, model.predict(X)))
-
-    # Tendance linéaire = pente du modèle de degré 1 sur les données
-    lin_model  = Ridge(alpha=cfg.ML_RIDGE_ALPHA).fit(X, y)
-    trend      = float(lin_model.coef_[0])
-
-    return round(pred, 1), round(trend, 2), round(r2, 3)
-
-
-def _bootstrap_ci(
-    X: np.ndarray,
-    y: np.ndarray,
-    next_idx: int,
-    n_bootstrap: int = 100,
-    ci: float = 0.95,
-) -> Tuple[float, float]:
-    """
-    Intervalle de confiance par bootstrap (rééchantillonnage).
-
-    Retourne (borne_basse, borne_haute) à `ci`×100 % de confiance.
-    """
-    preds = []
-    n     = len(y)
-    rng   = np.random.default_rng(seed=42)
-
-    for _ in range(n_bootstrap):
-        idx    = rng.integers(0, n, size=n)
-        Xs, ys = X[idx], y[idx]
-        if len(np.unique(ys)) < 2:
-            continue
-        model  = _build_model()
-        try:
-            model.fit(Xs, ys)
-            preds.append(float(model.predict([[next_idx]])[0]))
-        except Exception:
-            pass
-
-    if not preds:
-        return 0.0, 0.0
-
-    alpha = (1 - ci) / 2
-    return round(float(np.quantile(preds, alpha)), 1), round(float(np.quantile(preds, 1 - alpha)), 1)
-
-
+    return AnomalyReport(variable, n_anomalies, anomaly_indices, cleaned)
 # ─────────────────────────────────────────────────────────────────────────────
 # Prédiction principale
 # ─────────────────────────────────────────────────────────────────────────────
@@ -349,8 +325,15 @@ def predict_irrigation_combined(
         if anomaly_reports:
             score += 5
             vars_anom = ", ".join(r.variable for r in anomaly_reports)
-            reasons.append("🔍 Anomalies capteurs : {}".format(vars_anom))
+            for r in anomaly_reports:
+               if r.n_anomalies == 1:
+                  reasons.append(f"⚠️ Valeur inhabituelle ({r.variable})")
 
+               elif r.n_anomalies >= 3:
+                 reasons.append(f"🚨 Capteur suspect ({r.variable})")
+
+            else:
+                  reasons.append(f"⚠️ Anomalies ponctuelles ({r.variable})")
         score        = min(score, 100)
         is_dangerous = score >= cfg.DANGEROUS_SCORE
         reason_str   = " | ".join(reasons) if reasons else "Conditions normales"
