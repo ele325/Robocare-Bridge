@@ -15,7 +15,7 @@ GROQ_MAX_RETRIES = 3
 # ── MQTT ────────────────────────────────────────────────────────────────────
 MQTT_BROKER = os.environ.get("MQTT_BROKER", "80.75.212.179")
 MQTT_PORT     = int(os.environ.get("MQTT_PORT", 1883))
-MQTT_USER     = "root"
+MQTT_USER     = "KV79LS2dUvKYCgtx"
 MQTT_PASSWORD = "A6k0tYRThA7UjNNH"
 MQTT_TOPIC_DATA = "robocare/+/zone/+/sensor/+/data"
 # ── ML ──────────────────────────────────────────────────────────────────────
