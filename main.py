@@ -38,7 +38,8 @@ import mqtt_handler
 
 mqtt_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
 mqtt_client.on_connect = mqtt_handler.on_connect
-mqtt_client.on_message = mqtt_handler.on_messagemqtt_client.username_pw_set(cfg.MQTT_USER, cfg.MQTT_PASSWORD)
+mqtt_client.on_message = mqtt_handler.on_message
+mqtt_client.username_pw_set(cfg.MQTT_USER, cfg.MQTT_PASSWORD)
 mqtt_handler.init(mqtt_client, db)
 # ↑ SUPPRIMÉ : mqtt_client.connect() ici — il sera appelé une seule fois dans main()
 
