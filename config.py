@@ -13,26 +13,27 @@ GROQ_TEMPERATURE = 0.3
 GROQ_MAX_RETRIES = 3
 
 # ── MQTT ────────────────────────────────────────────────────────────────────
-MQTT_BROKER = os.environ.get("MQTT_BROKER", "80.75.212.179")
-MQTT_PORT     = int(os.environ.get("MQTT_PORT", 1883))
-MQTT_USER     = "KV79LS2dUvKYCgtx"
-MQTT_PASSWORD = "123123"
+MQTT_BROKER     = os.environ.get("MQTT_BROKER", "80.75.212.179")
+MQTT_PORT       = int(os.environ.get("MQTT_PORT", 1883))
+MQTT_USER       = ""   # ✅ pas d'auth sur Mosquitto
+MQTT_PASSWORD   = ""   # ✅ pas d'auth sur Mosquitto
 MQTT_TOPIC_DATA = "robocare/+/zone/+/sensor/+/data"
+
 # ── ML ──────────────────────────────────────────────────────────────────────
-ML_HISTORY_LIMIT        = 30   # nb relevés pour régression
-ML_MIN_HISTORY          = 10   # minimum requis
+ML_HISTORY_LIMIT        = 30
+ML_MIN_HISTORY          = 10
 ML_STRESS_HISTORY_LIMIT = 5
 ML_STRESS_MIN_HISTORY   = 3
-ML_POLY_DEGREE          = 2    # degré polynomial
-ML_RIDGE_ALPHA          = 1.0  # régularisation Ridge
-ML_ZSCORE_THRESHOLD     = 2.5  # seuil détection anomalie
-DANGEROUS_SCORE         = 50   # score à partir duquel on notifie
+ML_POLY_DEGREE          = 2
+ML_RIDGE_ALPHA          = 1.0
+ML_ZSCORE_THRESHOLD     = 2.5
+DANGEROUS_SCORE         = 50
 
 # ── Seuils agronomiques ──────────────────────────────────────────────────────
 HUMIDITY_CRITICAL = 25.0
 HUMIDITY_LOW      = 35.0
 HUMIDITY_LIMIT    = 45.0
-HUMIDITY_ALERT    = 30.0   # seuil notification immédiate
+HUMIDITY_ALERT    = 30.0
 TEMP_EXCESSIVE    = 35.0
 TEMP_HIGH         = 28.0
 TEMP_NORMAL       = 22.0
@@ -60,6 +61,4 @@ HEALTH_P_MIN        = 10.0
 HEALTH_K_MIN        = 20.0
 
 # ── Multi-capteurs ───────────────────────────────────────────────────────────
-# Durée (en secondes) au-delà de laquelle un capteur est considéré inactif
-# et exclu du calcul de moyenne. Mettre à None pour désactiver.
 SENSOR_STALE_SECONDS = 300   # 5 minutes

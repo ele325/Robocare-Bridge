@@ -11,20 +11,21 @@ if hasattr(sys.stdout, "reconfigure"):
 if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8")
 
-# ── Logging (initialiser en premier) ────────────────────────────────────────
+# ── Logging ──────────────────────────────────────────────────────────────────
 from utils.logger import setup_logging, get_logger
 setup_logging("robocare.log")
 logger = get_logger("robocare.main")
 
-# ── Validation de la configuration ──────────────────────────────────────────
+# ── Validation configuration ─────────────────────────────────────────────────
 import config as cfg
 if not cfg.GROQ_API_KEY:
     logger.critical(
-        "GROQ_API_KEY manquante ! Définissez-la avec : $env:GROQ_API_KEY='votre_cle'"
+        "GROQ_API_KEY manquante ! Définissez-la avec : "
+        "$env:GROQ_API_KEY='votre_cle'"
     )
     sys.exit(1)
 
-# ── Firebase ────────────────────────────────────────────────────────────────
+# ── Firebase ─────────────────────────────────────────────────────────────────
 from firebase_admin import credentials, firestore
 import firebase_admin
 
@@ -32,30 +33,31 @@ cred = credentials.Certificate("serviceAccountKey.json")
 firebase_admin.initialize_app(cred)
 db = firestore.client()
 
-# ── MQTT ────────────────────────────────────────────────────────────────────
+# ── MQTT ─────────────────────────────────────────────────────────────────────
 import paho.mqtt.client as mqtt
 import mqtt_handler
 
 mqtt_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
 mqtt_client.on_connect = mqtt_handler.on_connect
 mqtt_client.on_message = mqtt_handler.on_message
-mqtt_client.username_pw_set(cfg.MQTT_USER, cfg.MQTT_PASSWORD)
+
+# ✅ Auth désactivée — Mosquitto en allow_anonymous
+# mqtt_client.username_pw_set(cfg.MQTT_USER, cfg.MQTT_PASSWORD)
+
 mqtt_handler.init(mqtt_client, db)
-# ↑ SUPPRIMÉ : mqtt_client.connect() ici — il sera appelé une seule fois dans main()
 
 
 # ── Démarrage ────────────────────────────────────────────────────────────────
 def main():
     logger.info("RoboCare Bridge — démarrage")
     logger.info(
-        "Adressage fixe : le remplacement hardware se fait en reconfigurant "
-        "le nouveau capteur/zone avec la même adresse."
+        "Adressage fixe : le remplacement hardware se fait en "
+        "reconfigurant le nouveau capteur/zone avec la même adresse."
     )
 
     try:
-        mqtt_client.connect(cfg.MQTT_BROKER, cfg.MQTT_PORT)  # ← une seule fois ici
+        mqtt_client.connect(cfg.MQTT_BROKER, cfg.MQTT_PORT)
 
-        # Watchers Firestore
         threading.Thread(
             target=mqtt_handler.start_all_watchers,
             daemon=True,

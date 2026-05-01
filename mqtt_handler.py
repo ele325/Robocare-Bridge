@@ -1,11 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-mqtt_handler.py — Callbacks MQTT RoboCare v2.5
-Corrections v2.5 :
-  - _control_valve_auto() : vanne d'abord (200ms) puis pompe
-  - _on_zones_snapshot()  : commande vanne + pompe dans le bon ordre
-  - auto_close()          : arrêt pompe avant fermeture vanne
-  - Commande manuelle app mobile : ordre correct via Firestore watcher
+mqtt_handler.py — Callbacks MQTT RoboCare v2.6
+Corrections v2.6 :
+  - on_message : ne bloque plus les topics valve/pump (< 7 parts)
+  - on_connect : subscribe aux topics valve/pump pour logs
+  - auth MQTT supprimée (Mosquitto allow_anonymous)
 """
 
 import json
@@ -26,13 +25,12 @@ logger = get_logger("robocare.mqtt")
 
 # ── État interne ─────────────────────────────────────────────────────────────
 
-_command_watchers:    dict  = {}
-_zone_watchers:       dict  = {}
-_processed_msg_ids:   set   = set()
-_watcher_start_time:  float = time.time()
+_command_watchers:   dict  = {}
+_zone_watchers:      dict  = {}
+_processed_msg_ids:  set   = set()
+_watcher_start_time: float = time.time()
 
-# Délai mécanique ouverture/fermeture électrovanne (secondes)
-VALVE_DELAY_S = 0.3   # 300 ms — temps ouverture mécanique vanne
+VALVE_DELAY_S = 0.3
 
 mqtt_client = None
 db          = None
@@ -47,27 +45,17 @@ def init(client, firestore_db):
 # ── Helpers irrigation ────────────────────────────────────────────────────────
 
 def _publish_irrigation_start(uid: str, zone_num: str) -> None:
-    """
-    Démarre l'irrigation d'une zone :
-      1. Publie vanne ON
-      2. Attend VALVE_DELAY_S (ouverture mécanique)
-      3. Publie pompe ON
-    Exécuté dans un thread séparé pour ne pas bloquer le callback MQTT.
-    """
     def _do_start():
         logger.info("Zone %s → Irrigation START (vanne puis pompe)", zone_num)
 
-        # 1. Ouvrir la vanne
         mqtt_client.publish(
             f"robocare/{uid}/valve/control/{zone_num}",
             "1",
             qos=1,
         )
 
-        # 2. Attendre ouverture mécanique
         time.sleep(VALVE_DELAY_S)
 
-        # 3. Démarrer la pompe
         mqtt_client.publish(
             f"robocare/{uid}/pump/control",
             "1",
@@ -80,32 +68,25 @@ def _publish_irrigation_start(uid: str, zone_num: str) -> None:
             VALVE_DELAY_S * 1000,
         )
 
-    threading.Thread(target=_do_start, daemon=True,
-                     name=f"irrig-start-z{zone_num}").start()
+    threading.Thread(
+        target=_do_start,
+        daemon=True,
+        name=f"irrig-start-z{zone_num}",
+    ).start()
 
 
 def _publish_irrigation_stop(uid: str, zone_num: str) -> None:
-    """
-    Arrête l'irrigation d'une zone :
-      1. Publie pompe OFF
-      2. Attend VALVE_DELAY_S (arrêt complet pompe)
-      3. Publie vanne OFF
-    Exécuté dans un thread séparé.
-    """
     def _do_stop():
         logger.info("Zone %s → Irrigation STOP (pompe puis vanne)", zone_num)
 
-        # 1. Arrêter la pompe d'abord (évite surpression)
         mqtt_client.publish(
             f"robocare/{uid}/pump/control",
             "0",
             qos=1,
         )
 
-        # 2. Attendre arrêt complet
         time.sleep(VALVE_DELAY_S)
 
-        # 3. Fermer la vanne
         mqtt_client.publish(
             f"robocare/{uid}/valve/control/{zone_num}",
             "0",
@@ -118,17 +99,16 @@ def _publish_irrigation_stop(uid: str, zone_num: str) -> None:
             VALVE_DELAY_S * 1000,
         )
 
-    threading.Thread(target=_do_stop, daemon=True,
-                     name=f"irrig-stop-z{zone_num}").start()
+    threading.Thread(
+        target=_do_stop,
+        daemon=True,
+        name=f"irrig-stop-z{zone_num}",
+    ).start()
 
 
-# ── Surveillance des capteurs silencieux ─────────────────────────────────────
+# ── Surveillance capteurs silencieux ─────────────────────────────────────────
 
 def _stale_sensor_watcher(interval_seconds: int = 60):
-    """
-    Thread daemon — vérifie toutes les interval_seconds les capteurs actifs.
-    Si un capteur dépasse SENSOR_STALE_SECONDS → désactivé.
-    """
     if not cfg.SENSOR_STALE_SECONDS:
         logger.info(
             "Surveillance capteurs silencieux désactivée "
@@ -145,10 +125,8 @@ def _stale_sensor_watcher(interval_seconds: int = 60):
 
     while True:
         time.sleep(interval_seconds)
-
         try:
             users = db.collection("users").get()
-
             for user_doc in users:
                 uid   = user_doc.id
                 zones = (
@@ -157,19 +135,15 @@ def _stale_sensor_watcher(interval_seconds: int = 60):
                     .collection("zones")
                     .get()
                 )
-
                 for zone_doc in zones:
                     zone_num = zone_doc.id.replace("zone", "")
                     _check_stale_sensors_in_zone(uid, zone_num)
-
         except Exception as exc:
             logger.error("Erreur thread surveillance : %s", exc)
 
 
 def _check_stale_sensors_in_zone(uid: str, zone_num: str) -> None:
-    """Désactive les capteurs silencieux d'une zone."""
     now = time.time()
-
     try:
         sensor_docs = (
             db.collection("users")
@@ -183,7 +157,6 @@ def _check_stale_sensors_in_zone(uid: str, zone_num: str) -> None:
 
         for doc in sensor_docs:
             data = doc.to_dict()
-
             if not data:
                 continue
 
@@ -202,14 +175,11 @@ def _check_stale_sensors_in_zone(uid: str, zone_num: str) -> None:
 
             if age > cfg.SENSOR_STALE_SECONDS:
                 sensor_id = doc.id
-
                 logger.warning(
                     "Zone %s | Capteur %s silencieux depuis %.0fs → désactivé",
                     zone_num, sensor_id, age,
                 )
-
                 deactivate_sensor(db, uid, zone_num, sensor_id)
-
                 mqtt_client.publish(
                     f"robocare/{uid}/zone/{zone_num}/sensor/{sensor_id}/status",
                     "offline",
@@ -224,7 +194,6 @@ def _check_stale_sensors_in_zone(uid: str, zone_num: str) -> None:
 
 
 def start_stale_watcher(interval_seconds: int = 60) -> None:
-    """Démarre le thread de surveillance des capteurs silencieux."""
     t = threading.Thread(
         target=_stale_sensor_watcher,
         args=(interval_seconds,),
@@ -234,11 +203,9 @@ def start_stale_watcher(interval_seconds: int = 60) -> None:
     t.start()
 
 
-# ── Lecture des seuils depuis Firebase ───────────────────────────────────────
+# ── Lecture seuils Firebase ───────────────────────────────────────────────────
 
 def _get_zone_config(uid: str, zone_num: str) -> dict:
-    """Lit la configuration d'irrigation d'une zone depuis Firestore."""
-
     defaults = {
         "minHumidity": cfg.HUMIDITY_ALERT,
         "maxHumidity": 70.0,
@@ -257,14 +224,11 @@ def _get_zone_config(uid: str, zone_num: str) -> dict:
         )
 
         zone_doc = zone_ref.get()
-
         if zone_doc.exists:
             zone_data = zone_doc.to_dict() or {}
             defaults.update({
-                "zone_name": zone_data.get(
-                    "zone_name",
-                    zone_data.get("name", defaults["zone_name"]),
-                ),
+                "zone_name":  zone_data.get("zone_name",
+                              zone_data.get("name", defaults["zone_name"])),
                 "plant_type": zone_data.get("plant_type"),
                 "crop_stage": zone_data.get("crop_stage"),
             })
@@ -278,9 +242,8 @@ def _get_zone_config(uid: str, zone_num: str) -> dict:
             defaults.update({
                 "minHumidity": float(t.get("minHumidity", defaults["minHumidity"])),
                 "maxHumidity": float(t.get("maxHumidity", defaults["maxHumidity"])),
-                "duration":    int(t.get("duration",    defaults["duration"])),
+                "duration":    int(t.get("duration",      defaults["duration"])),
             })
-
             logger.info(
                 "Seuils zone %s : min=%.1f max=%.1f durée=%d min",
                 zone_num,
@@ -300,18 +263,9 @@ def _get_zone_config(uid: str, zone_num: str) -> dict:
     return defaults
 
 
-# ── Contrôle automatique de l'irrigation ─────────────────────────────────────
+# ── Contrôle automatique irrigation ──────────────────────────────────────────
 
 def _control_valve_auto(uid: str, zone_num: str, humidity: float) -> None:
-    """
-    CORRECTION v2.5 — Active/désactive irrigation avec le bon ordre :
-      ON  : vanne d'abord → délai → pompe
-      OFF : pompe d'abord → délai → vanne
-
-    Si humidity < minHumidity → irrigation ON
-    Si humidity >= maxHumidity → irrigation OFF
-    """
-
     thresholds   = _get_zone_config(uid, zone_num)
     min_humidity = thresholds["minHumidity"]
     max_humidity = thresholds["maxHumidity"]
@@ -322,11 +276,8 @@ def _control_valve_auto(uid: str, zone_num: str, humidity: float) -> None:
             "Zone %s | H moy. %.1f%% < min %.1f%% → Irrigation ON",
             zone_num, humidity, min_humidity,
         )
-
-        # Démarrer : vanne → délai → pompe
         _publish_irrigation_start(uid, zone_num)
 
-        # Mise à jour Firestore
         (
             db.collection("users")
             .document(uid)
@@ -335,10 +286,8 @@ def _control_valve_auto(uid: str, zone_num: str, humidity: float) -> None:
             .update({"enabled": True})
         )
 
-        # Fermeture automatique après durée configurée
         def auto_close():
             time.sleep(duration * 60)
-
             try:
                 zone_doc = (
                     db.collection("users")
@@ -347,21 +296,16 @@ def _control_valve_auto(uid: str, zone_num: str, humidity: float) -> None:
                     .document(f"zone{zone_num}")
                     .get()
                 )
-
                 if not zone_doc.exists:
                     return
 
                 current_h = zone_doc.to_dict().get("humidity", 0)
-
                 if current_h >= max_humidity:
                     logger.info(
-                        "Zone %s | H moy. %.1f%% ≥ max %.1f%% → Irrigation OFF auto",
+                        "Zone %s | H moy. %.1f%% ≥ max %.1f%% → OFF auto",
                         zone_num, current_h, max_humidity,
                     )
-
-                    # Arrêter : pompe → délai → vanne
                     _publish_irrigation_stop(uid, zone_num)
-
                     (
                         db.collection("users")
                         .document(uid)
@@ -369,7 +313,6 @@ def _control_valve_auto(uid: str, zone_num: str, humidity: float) -> None:
                         .document(f"zone{zone_num}")
                         .update({"enabled": False})
                     )
-
             except Exception as exc:
                 logger.error(
                     "Erreur fermeture auto zone %s : %s", zone_num, exc,
@@ -386,10 +329,7 @@ def _control_valve_auto(uid: str, zone_num: str, humidity: float) -> None:
             "Zone %s | H moy. %.1f%% ≥ max %.1f%% → Irrigation OFF",
             zone_num, humidity, max_humidity,
         )
-
-        # Arrêter : pompe → délai → vanne
         _publish_irrigation_stop(uid, zone_num)
-
         (
             db.collection("users")
             .document(uid)
@@ -404,27 +344,51 @@ def _control_valve_auto(uid: str, zone_num: str, humidity: float) -> None:
 def on_connect(client, userdata, flags, reason_code, properties):
     logger.info("Connecté au broker MQTT (code %s)", reason_code)
 
+    # Topics data capteurs
     client.subscribe(cfg.MQTT_TOPIC_DATA)
     client.subscribe("robocare/discovery")
+
+    # ✅ AJOUT v2.6 — subscribe valve/pump pour logs
+    client.subscribe("robocare/+/valve/control/+")
+    client.subscribe("robocare/+/pump/control")
 
     logger.info("Subscriptions actives :")
     logger.info("  → %s", cfg.MQTT_TOPIC_DATA)
     logger.info("  → robocare/discovery")
+    logger.info("  → robocare/+/valve/control/+")
+    logger.info("  → robocare/+/pump/control")
 
 
 def on_message(client, userdata, msg):
-    """
-    Callback principal MQTT.
-    Topic : robocare/{uid}/zone/{zone_num}/sensor/{sensor_id}/data
-    """
-
     try:
+        # ── Discovery ──
         if msg.topic == "robocare/discovery":
             _handle_discovery(msg)
             return
 
         parts = msg.topic.split("/")
 
+        # ✅ CORRIGÉ v2.6 — topics valve/pump gérés par ESP32
+        # Le bridge les reçoit juste pour les logger
+        if len(parts) >= 5 and parts[2] == "valve" and parts[3] == "control":
+            payload = msg.payload.decode("utf-8")
+            logger.info(
+                "Commande VANNE reçue → zone=%s payload=%s "
+                "(transmise directement à ESP32)",
+                parts[4], payload,
+            )
+            return
+
+        if len(parts) >= 4 and parts[2] == "pump" and parts[3] == "control":
+            payload = msg.payload.decode("utf-8")
+            logger.info(
+                "Commande POMPE reçue → payload=%s "
+                "(transmise directement à ESP32)",
+                payload,
+            )
+            return
+
+        # ── Topics data — minimum 7 parts ──
         if len(parts) < 7:
             logger.warning(
                 "Topic inattendu (attendu ≥ 7 parts, reçu %d) : %s",
@@ -443,7 +407,6 @@ def on_message(client, userdata, msg):
             zone_num, sensor_id, uid,
         )
 
-        # Mise à jour Firestore
         result = update_sensor_data(db, uid, zone_num, payload, sensor_id)
 
         if result[0] is None:
@@ -451,9 +414,7 @@ def on_message(client, userdata, msg):
 
         humidity, temperature, ph, ec, n, p, k = result
 
-        # Métadonnées réseau
         meta = payload.get("meta", {})
-
         if isinstance(meta, dict) and meta:
             try:
                 (
@@ -471,30 +432,25 @@ def on_message(client, userdata, msg):
                         "timestamp": firestore.SERVER_TIMESTAMP,
                     })
                 )
-
                 logger.info(
-                    "Zone %s | Capteur %s | MAC: %s | RSSI: %s dBm | SNR: %s",
+                    "Zone %s | Capteur %s | MAC: %s | RSSI: %s | SNR: %s",
                     zone_num, sensor_id,
                     meta.get("mac"), meta.get("rssi"), meta.get("snr"),
                 )
-
             except Exception as exc:
                 logger.warning(
-                    "Erreur sauvegarde métadonnées zone %s : %s", zone_num, exc,
+                    "Erreur sauvegarde métadonnées zone %s : %s",
+                    zone_num, exc,
                 )
 
-        # ── CONTRÔLE AUTOMATIQUE IRRIGATION ──
         _control_valve_auto(uid, zone_num, humidity)
 
-        # Alerte critique
         if humidity < cfg.HUMIDITY_ALERT:
             send_critical_alert(db, uid, zone_num, humidity)
 
-        # ML stress hydrique
         if predict_stress_risk(db, uid, zone_num, humidity):
             logger.warning("Stress hydrique prédit — Zone %s", zone_num)
 
-        # ML combinée
         ml_result = predict_irrigation_combined(
             db, uid, zone_num,
             humidity, temperature, ec, n, p, k,
@@ -540,10 +496,7 @@ def _handle_discovery(msg):
             if status == "claimed" and uid:
                 config_topic = f"robocare/config/{mac}"
                 mqtt_client.publish(config_topic, uid, qos=1, retain=True)
-
-                logger.info(
-                    "Device connu → UID envoyé : %s → %s", mac, uid,
-                )
+                logger.info("Device connu → UID envoyé : %s → %s", mac, uid)
                 return
 
         doc_ref.set(
@@ -554,7 +507,6 @@ def _handle_discovery(msg):
             },
             merge=True,
         )
-
         logger.info("Nouveau device enregistré en attente : MAC=%s", mac)
 
     except Exception as exc:
@@ -564,7 +516,6 @@ def _handle_discovery(msg):
 # ── Listeners Firestore ──────────────────────────────────────────────────────
 
 def _on_variateur_snapshot(uid, doc_snapshot, changes, read_time):
-    """Watcher pompe manuelle (variateur)."""
     for doc in doc_snapshot:
         if not doc.exists:
             continue
@@ -588,13 +539,6 @@ def _on_variateur_snapshot(uid, doc_snapshot, changes, read_time):
 
 
 def _on_zones_snapshot(uid, col_snapshot, changes, read_time):
-    """
-    CORRECTION v2.5 — Watcher Firestore zones.
-    Quand l'utilisateur change enabled dans une zone (via app mobile) :
-      ON  → vanne d'abord → délai → pompe
-      OFF → pompe d'abord → délai → vanne
-    """
-
     for change in changes:
         if change.type.name in ("ADDED", "MODIFIED"):
             doc      = change.document
@@ -606,29 +550,22 @@ def _on_zones_snapshot(uid, col_snapshot, changes, read_time):
                 logger.info(
                     "App mobile → Zone %s ON (vanne puis pompe)", zone_num,
                 )
-                # Commande manuelle : vanne → délai → pompe
                 _publish_irrigation_start(uid, zone_num)
-
             else:
                 logger.info(
                     "App mobile → Zone %s OFF (pompe puis vanne)", zone_num,
                 )
-                # Commande manuelle : pompe → délai → vanne
                 _publish_irrigation_stop(uid, zone_num)
 
         elif change.type.name == "REMOVED":
             zone_num = change.document.id.replace("zone", "")
-
             logger.info(
                 "Zone %s supprimée — arrêt irrigation sécurisé", zone_num,
             )
-
-            # Sécurité : arrêt propre
             _publish_irrigation_stop(uid, zone_num)
 
 
 def on_msg_snapshot(col_snap, changes, read_time):
-    """Watcher messages chatbot."""
     for change in changes:
         if change.type.name != "ADDED":
             continue
@@ -644,26 +581,23 @@ def on_msg_snapshot(col_snap, changes, read_time):
         if len(path_parts) == 4 and path_parts[2] == "messages":
             _processed_msg_ids.add(doc.id)
             continue
-
         elif len(path_parts) == 6 and path_parts[4] == "messages":
             uid     = path_parts[1]
             chat_id = path_parts[3]
-
         else:
-            logger.warning("Chemin inconnu ignoré : %s", doc.reference.path)
+            logger.warning(
+                "Chemin inconnu ignoré : %s", doc.reference.path,
+            )
             _processed_msg_ids.add(doc.id)
             continue
 
         msg_time = data.get("timestamp")
-
         if msg_time is not None:
             ts = msg_time
-
             if hasattr(ts, "timestamp"):
                 ts = ts.timestamp()
             elif hasattr(ts, "_seconds"):
                 ts = ts._seconds
-
             try:
                 if float(ts) < _watcher_start_time - 30:
                     _processed_msg_ids.add(doc.id)
@@ -676,7 +610,7 @@ def on_msg_snapshot(col_snap, changes, read_time):
             handle_chatbot_async(db, uid, chat_id, data.get("text", ""))
 
 
-# ── Démarrage des watchers ────────────────────────────────────────────────────
+# ── Démarrage watchers ────────────────────────────────────────────────────────
 
 def start_command_listener(uid: str) -> None:
     if uid in _command_watchers:
@@ -734,16 +668,13 @@ def start_all_watchers() -> None:
 
             if status == "claimed" and mac and uid:
                 config_topic = f"robocare/config/{mac}"
-
                 mqtt_client.publish(
                     config_topic, uid, qos=1, retain=True,
                 )
-
                 logger.info(
                     "Device claimed → UID publié : %s → topic %s",
                     uid, config_topic,
                 )
-
                 start_command_listener(uid)
 
     db.collection("pending_devices").on_snapshot(on_pending)
