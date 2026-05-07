@@ -15,7 +15,11 @@ from firebase_admin import firestore
 
 import config as cfg
 from services.firebase_service import update_sensor_data, deactivate_sensor
-from services.notification_service import send_critical_alert, send_irrigation_prediction
+from services.notification_service import (
+    send_critical_alert,
+    send_irrigation_prediction,
+    send_thresholds_summary_alert,
+)
 from services.chatbot_service import handle_chatbot_async
 from ml.predictor import predict_stress_risk, predict_irrigation_combined
 from utils.logger import get_logger
@@ -233,10 +237,34 @@ def _get_zone_config(uid: str, zone_num: str) -> dict:
                 "crop_stage": zone_data.get("crop_stage"),
             })
 
-        thresholds_doc = (
-            zone_ref.collection("config").document("thresholds").get()
+        plant_current_doc = (
+            zone_ref.collection("plante").document("current").get()
         )
+        if plant_current_doc.exists:
+            plant_data = plant_current_doc.to_dict() or {}
+            plant_thresholds = plant_data.get("thresholds", {})
+            humidity_limits = (
+                plant_thresholds.get("humidity", {})
+                if isinstance(plant_thresholds, dict)
+                else {}
+            )
+            if isinstance(humidity_limits, dict):
+                defaults.update({
+                    "minHumidity": float(
+                        humidity_limits.get("min", defaults["minHumidity"])
+                    ),
+                    "maxHumidity": float(
+                        humidity_limits.get("max", defaults["maxHumidity"])
+                    ),
+                })
+                logger.info(
+                    "Seuils humidité zone %s lus depuis plante/current : min=%.1f max=%.1f",
+                    zone_num,
+                    defaults["minHumidity"],
+                    defaults["maxHumidity"],
+                )
 
+        thresholds_doc = zone_ref.collection("config").document("thresholds").get()
         if thresholds_doc.exists:
             t = thresholds_doc.to_dict() or {}
             defaults.update({
@@ -261,6 +289,137 @@ def _get_zone_config(uid: str, zone_num: str) -> dict:
         logger.error("Erreur lecture config zone %s : %s", zone_num, exc)
 
     return defaults
+
+
+def _to_float(value, default: float | None = None) -> float | None:
+    try:
+        if value is None:
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _get_plant_thresholds(uid: str, zone_num: str) -> dict:
+    """
+    Lit users/{uid}/zones/zone{zone_num}/plante/current puis retourne :
+    {
+      "humidity": {"min": x, "max": y},
+      "ec": {"min": x, "max": y},
+      ...
+    }
+    """
+    thresholds = {}
+    try:
+        current_ref = (
+            db.collection("users")
+            .document(uid)
+            .collection("zones")
+            .document(f"zone{zone_num}")
+            .collection("plante")
+            .document("current")
+        )
+        snap = current_ref.get()
+        if not snap.exists:
+            return thresholds
+
+        data = snap.to_dict() or {}
+        raw_thresholds = data.get("thresholds", {})
+        if not isinstance(raw_thresholds, dict):
+            return thresholds
+
+        for field in ("humidity", "ec", "ph", "n", "p", "k"):
+            limits = raw_thresholds.get(field, {})
+            if not isinstance(limits, dict):
+                continue
+            min_v = _to_float(limits.get("min"))
+            max_v = _to_float(limits.get("max"))
+            if min_v is None or max_v is None:
+                continue
+            thresholds[field] = {"min": min_v, "max": max_v}
+
+    except Exception as exc:
+        logger.error(
+            "Erreur lecture seuils plante/current zone %s : %s", zone_num, exc,
+        )
+
+    return thresholds
+
+
+def _get_plant_type(uid: str, zone_num: str) -> str | None:
+    """Retourne le type de plante depuis plante/current si disponible."""
+    try:
+        snap = (
+            db.collection("users")
+            .document(uid)
+            .collection("zones")
+            .document(f"zone{zone_num}")
+            .collection("plante")
+            .document("current")
+            .get()
+        )
+        if not snap.exists:
+            return None
+        data = snap.to_dict() or {}
+        value = data.get("plant_type", data.get("plantType"))
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    except Exception as exc:
+        logger.warning("Erreur lecture plant_type zone %s : %s", zone_num, exc)
+    return None
+
+
+def _check_thresholds_and_notify(
+    uid: str,
+    zone_num: str,
+    humidity: float,
+    ph: float,
+    ec: float,
+    n: float,
+    p: float,
+    k: float,
+) -> None:
+    thresholds = _get_plant_thresholds(uid, zone_num)
+    if not thresholds:
+        return
+
+    issues = []
+    values = {
+        "humidity": humidity,
+        "ph": ph,
+        "ec": ec,
+        "n": n,
+        "p": p,
+        "k": k,
+    }
+
+    for field, value in values.items():
+        limits = thresholds.get(field)
+        if not limits:
+            continue
+
+        min_v = limits["min"]
+        max_v = limits["max"]
+        if value < min_v or value > max_v:
+            logger.warning(
+                "Zone %s | %s=%.1f hors seuil [%.1f, %.1f]",
+                zone_num, field, value, min_v, max_v,
+            )
+            issues.append({
+                "field": field,
+                "value": round(value, 2),
+                "min": round(min_v, 2),
+                "max": round(max_v, 2),
+            })
+
+    if issues:
+        send_thresholds_summary_alert(
+            db=db,
+            uid=uid,
+            zone_num=zone_num,
+            plant_type=_get_plant_type(uid, zone_num),
+            issues=issues,
+        )
 
 
 # ── Contrôle automatique irrigation ──────────────────────────────────────────
@@ -444,6 +603,16 @@ def on_message(client, userdata, msg):
                 )
 
         _control_valve_auto(uid, zone_num, humidity)
+        _check_thresholds_and_notify(
+            uid=uid,
+            zone_num=zone_num,
+            humidity=humidity,
+            ph=ph,
+            ec=ec,
+            n=n,
+            p=p,
+            k=k,
+        )
 
         if humidity < cfg.HUMIDITY_ALERT:
             send_critical_alert(db, uid, zone_num, humidity)
