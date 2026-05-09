@@ -5,6 +5,9 @@ main.py — Point d'entrée RoboCare v6.0
 
 import sys
 import threading
+import os
+import json
+from firebase_admin import credentials
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
@@ -26,7 +29,8 @@ if not cfg.GROQ_API_KEY:
     sys.exit(1)
 
 # ── Firebase ─────────────────────────────────────────────────────────────────
-from firebase_admin import credentials, firestore
+firebase_json = json.loads(os.getenv("FIREBASE_CREDENTIALS"))
+cred = credentials.Certificate(firebase_json)
 import firebase_admin
 
 cred = credentials.Certificate("serviceAccountKey.json")
