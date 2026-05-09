@@ -220,3 +220,57 @@ def send_thresholds_summary_alert(
         "Notification résumé seuils envoyée — UID: %s Zone: %s Nb: %d Niveau: %s",
         uid, zone_num, issue_count, severity,
     )
+
+
+@retry(max_attempts=3, delay=5)
+def send_irrigation_finished_alert(db, uid: str, zone_num: str | int) -> None:
+    """Notification quand l'arrosage temporisé est terminé."""
+    topic = "user_{}".format(uid)
+    message = messaging.Message(
+        notification=messaging.Notification(
+            title="✅ Arrosage Terminé - Zone {}".format(zone_num),
+            body="L'arrosage de la zone {} est fini. La pompe est maintenant fermée.".format(zone_num),
+        ),
+        data={
+            "zone": str(zone_num),
+            "type": "irrigation_finished",
+            "click_action": "FLUTTER_NOTIFICATION_CLICK"
+        },
+        android=messaging.AndroidConfig(
+            priority='high',
+            notification=messaging.AndroidNotification(
+                channel_id='smartfarm_alerts',
+                vibrate_timings_millis=[0, 500, 200, 500], # Vibration attirante
+            ),
+        ),
+        topic=topic,
+    )
+    messaging.send(message)
+    logger.info("Notification FINISHED envoyée — UID: %s Zone: %s", uid, zone_num)
+
+
+@retry(max_attempts=3, delay=5)
+def send_sensor_failure_alert(db, uid: str, zone_num: str | int, sensor_id: str) -> None:
+    """Notification quand un capteur tombe en panne (stale)."""
+    topic = "user_{}".format(uid)
+    message = messaging.Message(
+        notification=messaging.Notification(
+            title="⚠️ Panne Capteur - Zone {}".format(zone_num),
+            body="Le capteur {} ne répond plus. Veuillez vérifier l'installation.".format(sensor_id),
+        ),
+        data={
+            "zone": str(zone_num),
+            "sensor": sensor_id,
+            "type": "sensor_failure",
+            "click_action": "FLUTTER_NOTIFICATION_CLICK"
+        },
+        android=messaging.AndroidConfig(
+            priority='high',
+            notification=messaging.AndroidNotification(
+                channel_id='smartfarm_alerts',
+            ),
+        ),
+        topic=topic,
+    )
+    messaging.send(message)
+    logger.info("Notification PANNE envoyée — UID: %s Zone: %s Sensor: %s", uid, zone_num, sensor_id)

@@ -19,6 +19,8 @@ from services.notification_service import (
     send_critical_alert,
     send_irrigation_prediction,
     send_thresholds_summary_alert,
+    send_irrigation_finished_alert,
+    send_sensor_failure_alert,
 )
 from services.chatbot_service import handle_chatbot_async
 from ml.predictor import predict_stress_risk, predict_irrigation_combined
@@ -184,6 +186,7 @@ def _check_stale_sensors_in_zone(uid: str, zone_num: str) -> None:
                     zone_num, sensor_id, age,
                 )
                 deactivate_sensor(db, uid, zone_num, sensor_id)
+                send_sensor_failure_alert(db, uid, zone_num, sensor_id) # Notification PANNE
                 mqtt_client.publish(
                     f"robocare/{uid}/zone/{zone_num}/sensor/{sensor_id}/status",
                     "offline",
@@ -507,15 +510,17 @@ def on_connect(client, userdata, flags, reason_code, properties):
     client.subscribe(cfg.MQTT_TOPIC_DATA)
     client.subscribe("robocare/discovery")
 
-    # ✅ AJOUT v2.6 — subscribe valve/pump pour logs
+    # ✅ AJOUT v2.6 — subscribe valve/pump/status pour logs et supervision
     client.subscribe("robocare/+/valve/control/+")
     client.subscribe("robocare/+/pump/control")
+    client.subscribe("robocare/+/zone/+/irrigation/status")
 
     logger.info("Subscriptions actives :")
     logger.info("  → %s", cfg.MQTT_TOPIC_DATA)
     logger.info("  → robocare/discovery")
     logger.info("  → robocare/+/valve/control/+")
     logger.info("  → robocare/+/pump/control")
+    logger.info("  → robocare/+/zone/+/irrigation/status")
 
 
 def on_message(client, userdata, msg):
@@ -545,6 +550,23 @@ def on_message(client, userdata, msg):
                 "(transmise directement à ESP32)",
                 payload,
             )
+            return
+
+        # ✅ SUPERVISION — robocare/{uid}/zone/{zone}/irrigation/status
+        if len(parts) >= 6 and parts[4] == "irrigation" and parts[5] == "status":
+            uid = parts[1]
+            zone_num = parts[3]
+            status = msg.payload.decode("utf-8")
+            logger.info("Statut irrigation Zone %s : %s", zone_num, status)
+            
+            # Mise à jour Firestore pour supervision Flutter
+            db.collection("users").document(uid).collection("zones").document(f"zone{zone_num}").update({
+                "irrigation_status": status,
+                "enabled": (status == "STARTED")
+            })
+
+            if status == "FINISHED":
+                send_irrigation_finished_alert(db, uid, zone_num)
             return
 
         # ── Topics data — minimum 7 parts ──
@@ -714,6 +736,19 @@ def _on_zones_snapshot(uid, col_snapshot, changes, read_time):
             data     = doc.to_dict() or {}
             enabled  = bool(data.get("enabled", False))
             zone_num = doc.id.replace("zone", "")
+
+            # ✅ NOUVEAU — Irrigation temporisée (Timed)
+            timed_seconds = data.get("timed_order_seconds", 0)
+            if timed_seconds > 0:
+                logger.info("App mobile → Zone %s TIMED START (%d s)", zone_num, timed_seconds)
+                mqtt_client.publish(
+                    f"robocare/{uid}/irrigation/timed/{zone_num}",
+                    str(timed_seconds),
+                    qos=1
+                )
+                # Reset order in Firestore to avoid re-triggering
+                doc.reference.update({"timed_order_seconds": 0})
+                return # Skip normal toggle if it was a timed order
 
             if enabled:
                 logger.info(
