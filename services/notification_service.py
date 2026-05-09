@@ -222,6 +222,50 @@ def send_thresholds_summary_alert(
     )
 
 
+
+@retry(max_attempts=3, delay=5)
+def send_auto_irrigation_started_alert(
+    db, uid: str, zone_num: str | int, humidity: float, min_humidity: float
+) -> None:
+    """Notification quand l'irrigation automatique démarre (humidité trop basse)."""
+    topic = "user_{}".format(uid)
+    message = messaging.Message(
+        notification=messaging.Notification(
+            title="💧 Irrigation AUTO démarrée - Zone {}".format(zone_num),
+            body="Humidité ({:.1f}%) sous le seuil ({:.1f}%). L'irrigation a été activée automatiquement.".format(
+                humidity, min_humidity
+            ),
+        ),
+        data={
+            "zone": str(zone_num),
+            "type": "auto_irrigation_started",
+            "humidity": str(humidity),
+            "click_action": "FLUTTER_NOTIFICATION_CLICK",
+        },
+        android=messaging.AndroidConfig(
+            priority='high',
+            notification=messaging.AndroidNotification(
+                channel_id='smartfarm_alerts',
+            ),
+        ),
+        topic=topic,
+    )
+    messaging.send(message)
+
+    db.collection("users").document(uid).collection("alerts").add({
+        "type": "auto_irrigation_started",
+        "level": "info",
+        "zone_num": str(zone_num),
+        "humidity": round(humidity, 1),
+        "min_humidity": round(min_humidity, 1),
+        "timestamp": firestore.SERVER_TIMESTAMP,
+    })
+    logger.info(
+        "Notification AUTO IRRIGATION START envoyée — UID: %s Zone: %s H: %.1f%%",
+        uid, zone_num, humidity,
+    )
+
+
 @retry(max_attempts=3, delay=5)
 def send_irrigation_finished_alert(db, uid: str, zone_num: str | int) -> None:
     """Notification quand l'arrosage temporisé est terminé."""

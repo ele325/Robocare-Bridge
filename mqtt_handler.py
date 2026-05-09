@@ -497,13 +497,21 @@ def _control_valve_auto(uid: str, zone_num: str, humidity: float) -> None:
         )
         _publish_irrigation_start(uid, zone_num)
 
+        # ✅ SUPERVISION — Mise à jour statut + notification démarrage AUTO
         (
             db.collection("users")
             .document(uid)
             .collection("zones")
             .document(f"zone{zone_num}")
-            .update({"enabled": True})
+            .update({
+                "enabled": True,
+                "irrigation_status": "STARTED",
+                "irrigation_mode": "auto",
+                "irrigation_started_at": firestore.SERVER_TIMESTAMP,
+            })
         )
+        from services.notification_service import send_auto_irrigation_started_alert
+        send_auto_irrigation_started_alert(db, uid, zone_num, round(humidity, 1), round(min_humidity, 1))
 
         def auto_close():
             time.sleep(duration * 60)
@@ -525,13 +533,20 @@ def _control_valve_auto(uid: str, zone_num: str, humidity: float) -> None:
                         zone_num, current_h, max_humidity,
                     )
                     _publish_irrigation_stop(uid, zone_num)
+                    # ✅ SUPERVISION — Mise à jour statut + notification arrêt AUTO (timer)
                     (
                         db.collection("users")
                         .document(uid)
                         .collection("zones")
                         .document(f"zone{zone_num}")
-                        .update({"enabled": False})
+                        .update({
+                            "enabled": False,
+                            "irrigation_status": "FINISHED",
+                            "irrigation_mode": "auto",
+                        })
                     )
+                    from services.notification_service import send_irrigation_finished_alert
+                    send_irrigation_finished_alert(db, uid, zone_num)
             except Exception as exc:
                 logger.error(
                     "Erreur fermeture auto zone %s : %s", zone_num, exc,
@@ -549,12 +564,17 @@ def _control_valve_auto(uid: str, zone_num: str, humidity: float) -> None:
             zone_num, humidity, max_humidity,
         )
         _publish_irrigation_stop(uid, zone_num)
+        # ✅ SUPERVISION — Mise à jour statut arrêt AUTO (humidité suffisante)
         (
             db.collection("users")
             .document(uid)
             .collection("zones")
             .document(f"zone{zone_num}")
-            .update({"enabled": False})
+            .update({
+                "enabled": False,
+                "irrigation_status": "FINISHED",
+                "irrigation_mode": "auto",
+            })
         )
 
 
