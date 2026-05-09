@@ -7,8 +7,7 @@ import sys
 import threading
 import os
 import json
-from firebase_admin import credentials
-
+from firebase_admin import credentials, firestore
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 if hasattr(sys.stderr, "reconfigure"):
