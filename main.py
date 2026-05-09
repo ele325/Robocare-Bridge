@@ -67,6 +67,7 @@ def main():
         ).start()
 
         mqtt_handler.start_stale_watcher(interval_seconds=60)
+        mqtt_handler.start_pump_watcher(interval_seconds=60)
 
         logger.info(
             "En attente de données MQTT sur %s:%d ...",

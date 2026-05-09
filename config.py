@@ -61,4 +61,4 @@ HEALTH_P_MIN        = 10.0
 HEALTH_K_MIN        = 20.0
 
 # ── Multi-capteurs ───────────────────────────────────────────────────────────
-SENSOR_STALE_SECONDS = 300   # 5 minutes
+SENSOR_STALE_SECONDS = 16200   # 4h30 minutes (Adapté pour 6 envois/jour)

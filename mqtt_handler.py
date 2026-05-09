@@ -21,6 +21,7 @@ from services.notification_service import (
     send_thresholds_summary_alert,
     send_irrigation_finished_alert,
     send_sensor_failure_alert,
+    send_pump_forgotten_alert,
 )
 from services.chatbot_service import handle_chatbot_async
 from ml.predictor import predict_stress_risk, predict_irrigation_combined
@@ -193,6 +194,14 @@ def _check_stale_sensors_in_zone(uid: str, zone_num: str) -> None:
                     qos=1,
                     retain=True,
                 )
+            elif age > 600: # 10 minutes
+                # État intermédiaire : Sommeil (Deep Sleep)
+                mqtt_client.publish(
+                    f"robocare/{uid}/zone/{zone_num}/sensor/{sensor_id}/status",
+                    "sleeping",
+                    qos=1,
+                    retain=True,
+                )
 
     except Exception as exc:
         logger.error(
@@ -206,6 +215,54 @@ def start_stale_watcher(interval_seconds: int = 60) -> None:
         args=(interval_seconds,),
         daemon=True,
         name="stale-sensor-watcher",
+    )
+    t.start()
+
+
+def _pump_safety_watcher(interval_seconds: int = 60):
+    """Vérifie si une pompe tourne en manuel depuis trop longtemps (ex: 15 min)."""
+    MAX_PUMP_MINUTES = 15
+    logger.info("Thread surveillance pompe démarré (seuil=%d min)", MAX_PUMP_MINUTES)
+    
+    while True:
+        time.sleep(interval_seconds)
+        try:
+            users = db.collection("users").get()
+            for user_doc in users:
+                uid = user_doc.id
+                zones = db.collection("users").document(uid).collection("zones").where("enabled", "==", True).get()
+                for zone_doc in zones:
+                    data = zone_doc.to_dict()
+                    start_time = data.get("pump_start_time")
+                    if not start_time:
+                        continue
+                    
+                    # Calcul de la durée
+                    now = time.time()
+                    if hasattr(start_time, "timestamp"):
+                        start_ts = start_time.timestamp()
+                    elif hasattr(start_time, "_seconds"):
+                        start_ts = start_time._seconds
+                    else:
+                        continue
+                        
+                    duration_min = (now - start_ts) / 60
+                    if duration_min > MAX_PUMP_MINUTES:
+                        zone_num = zone_doc.id.replace("zone", "")
+                        # On envoie une notification toutes les 15 minutes d'oubli
+                        if int(duration_min) % MAX_PUMP_MINUTES == 0:
+                            send_pump_forgotten_alert(db, uid, zone_num, int(duration_min))
+                            
+        except Exception as exc:
+            logger.error("Erreur thread surveillance pompe : %s", exc)
+
+
+def start_pump_watcher(interval_seconds: int = 60) -> None:
+    t = threading.Thread(
+        target=_pump_safety_watcher,
+        args=(interval_seconds,),
+        daemon=True,
+        name="pump-safety-watcher",
     )
     t.start()
 
@@ -590,6 +647,14 @@ def on_message(client, userdata, msg):
 
         result = update_sensor_data(db, uid, zone_num, payload, sensor_id)
 
+        # ✅ Remise à l'état ONLINE dès qu'on reçoit une donnée
+        mqtt_client.publish(
+            f"robocare/{uid}/zone/{zone_num}/sensor/{sensor_id}/status",
+            "online",
+            qos=1,
+            retain=True,
+        )
+
         if result[0] is None:
             return
 
@@ -746,19 +811,24 @@ def _on_zones_snapshot(uid, col_snapshot, changes, read_time):
                     str(timed_seconds),
                     qos=1
                 )
-                # Reset order in Firestore to avoid re-triggering
-                doc.reference.update({"timed_order_seconds": 0})
-                return # Skip normal toggle if it was a timed order
+                # Reset order and force ENABLED + STARTED status for UI feedback
+                doc.reference.update({
+                    "timed_order_seconds": 0,
+                    "enabled": True,
+                    "irrigation_status": "STARTED",
+                    "pump_start_time": firestore.SERVER_TIMESTAMP # Pour la sécurité
+                })
+                return 
 
             if enabled:
-                logger.info(
-                    "App mobile → Zone %s ON (vanne puis pompe)", zone_num,
-                )
+                logger.info("App mobile → Zone %s ON (manuel)", zone_num)
+                # On enregistre l'heure de démarrage si pas déjà fait
+                if "pump_start_time" not in data:
+                    doc.reference.update({"pump_start_time": firestore.SERVER_TIMESTAMP})
                 _publish_irrigation_start(uid, zone_num)
             else:
-                logger.info(
-                    "App mobile → Zone %s OFF (pompe puis vanne)", zone_num,
-                )
+                logger.info("App mobile → Zone %s OFF (manuel)", zone_num)
+                doc.reference.update({"pump_start_time": firestore.DELETE_FIELD})
                 _publish_irrigation_stop(uid, zone_num)
 
         elif change.type.name == "REMOVED":

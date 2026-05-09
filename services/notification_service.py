@@ -256,7 +256,7 @@ def send_sensor_failure_alert(db, uid: str, zone_num: str | int, sensor_id: str)
     message = messaging.Message(
         notification=messaging.Notification(
             title="⚠️ Panne Capteur - Zone {}".format(zone_num),
-            body="Le capteur {} ne répond plus. Veuillez vérifier l'installation.".format(sensor_id),
+            body="Le capteur {} n'a pas envoyé de données depuis plus de 4h. Veuillez vérifier l'installation ou la batterie.".format(sensor_id),
         ),
         data={
             "zone": str(zone_num),
@@ -274,3 +274,30 @@ def send_sensor_failure_alert(db, uid: str, zone_num: str | int, sensor_id: str)
     )
     messaging.send(message)
     logger.info("Notification PANNE envoyée — UID: %s Zone: %s Sensor: %s", uid, zone_num, sensor_id)
+
+
+@retry(max_attempts=3, delay=5)
+def send_pump_forgotten_alert(db, uid: str, zone_num: str | int, minutes: int) -> None:
+    """Alerte quand la pompe tourne en manuel depuis trop longtemps."""
+    topic = "user_{}".format(uid)
+    message = messaging.Message(
+        notification=messaging.Notification(
+            title="⚠️ Rappel : Pompe Allumée - Zone {}".format(zone_num),
+            body="La pompe de la zone {} tourne depuis {} minutes. N'oubliez pas de la fermer si nécessaire.".format(zone_num, minutes),
+        ),
+        data={
+            "zone": str(zone_num),
+            "type": "pump_forgotten",
+            "click_action": "FLUTTER_NOTIFICATION_CLICK"
+        },
+        android=messaging.AndroidConfig(
+            priority='high',
+            notification=messaging.AndroidNotification(
+                channel_id='smartfarm_alerts',
+                vibrate_timings_millis=[0, 1000, 500, 1000], # Vibration forte
+            ),
+        ),
+        topic=topic,
+    )
+    messaging.send(message)
+    logger.info("Notification OUBLI POMPE envoyée — UID: %s Zone: %s Duration: %d min", uid, zone_num, minutes)
