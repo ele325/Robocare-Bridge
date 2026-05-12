@@ -362,45 +362,58 @@ def _to_float(value, default: float | None = None) -> float | None:
 
 def _get_plant_thresholds(uid: str, zone_num: str) -> dict:
     """
-    Lit users/{uid}/zones/zone{zone_num}/plante/current puis retourne :
-    {
-      "humidity": {"min": x, "max": y},
-      "ec": {"min": x, "max": y},
-      ...
-    }
+    Lit users/{uid}/zones/zone{zone_num}/plante/current
+    ET users/{uid}/zones/zone{zone_num}/config/thresholds pour fusionner les seuils.
     """
     thresholds = {}
     try:
-        current_ref = (
+        zone_ref = (
             db.collection("users")
             .document(uid)
             .collection("zones")
             .document(f"zone{zone_num}")
-            .collection("plante")
-            .document("current")
         )
-        snap = current_ref.get()
-        if not snap.exists:
-            return thresholds
 
-        data = snap.to_dict() or {}
-        raw_thresholds = data.get("thresholds", {})
-        if not isinstance(raw_thresholds, dict):
-            return thresholds
+        # 1. Seuils spécifiques à la plante (recherche agronomique / JSON structuré)
+        current_snap = zone_ref.collection("plante").document("current").get()
+        if current_snap.exists:
+            data = current_snap.to_dict() or {}
+            raw_thresholds = data.get("thresholds", {})
+            if isinstance(raw_thresholds, dict):
+                for field in ("humidity", "temperature", "ec", "ph", "n", "p", "k"):
+                    limits = raw_thresholds.get(field, {})
+                    if isinstance(limits, dict):
+                        min_v = _to_float(limits.get("min"))
+                        max_v = _to_float(limits.get("max"))
+                        if min_v is not None and max_v is not None:
+                            thresholds[field] = {"min": min_v, "max": max_v}
 
-        for field in ("humidity", "ec", "ph", "n", "p", "k"):
-            limits = raw_thresholds.get(field, {})
-            if not isinstance(limits, dict):
-                continue
-            min_v = _to_float(limits.get("min"))
-            max_v = _to_float(limits.get("max"))
-            if min_v is None or max_v is None:
-                continue
-            thresholds[field] = {"min": min_v, "max": max_v}
+        # 2. Seuils configurés manuellement par l'admin (config/thresholds / Format Plat)
+        # Ils ont priorité sur les seuils agronomiques par défaut.
+        config_snap = zone_ref.collection("config").document("thresholds").get()
+        if config_snap.exists:
+            t = config_snap.to_dict() or {}
+            mapping = {
+                "humidity":    ("minHumidity", "maxHumidity"),
+                "temperature": ("minTemp",     "maxTemp"),
+                "ph":          ("minPh",       "maxPh"),
+                "ec":          ("minEc",       "maxEc"),
+                "n":           ("minN",        "maxN"),
+                "p":           ("minP",        "maxP"),
+                "k":           ("minK",        "maxK"),
+            }
+            
+            for field, (min_key, max_key) in mapping.items():
+                admin_min = _to_float(t.get(min_key))
+                admin_max = _to_float(t.get(max_key))
+                
+                if admin_min is not None and admin_max is not None:
+                    thresholds[field] = {"min": admin_min, "max": admin_max}
+                    logger.info("Seuils admin pour %s zone %s : [%.1f, %.1f]", field, zone_num, admin_min, admin_max)
 
     except Exception as exc:
         logger.error(
-            "Erreur lecture seuils plante/current zone %s : %s", zone_num, exc,
+            "Erreur lecture seuils fusionnés zone %s : %s", zone_num, exc,
         )
 
     return thresholds
@@ -433,6 +446,7 @@ def _check_thresholds_and_notify(
     uid: str,
     zone_num: str,
     humidity: float,
+    temperature: float,
     ph: float,
     ec: float,
     n: float,
@@ -446,6 +460,7 @@ def _check_thresholds_and_notify(
     issues = []
     values = {
         "humidity": humidity,
+        "temperature": temperature,
         "ph": ph,
         "ec": ec,
         "n": n,
@@ -709,11 +724,16 @@ def on_message(client, userdata, msg):
                     zone_num, exc,
                 )
 
+        # On récupère la config complète pour avoir les seuils à jour
+        zone_cfg = _get_zone_config(uid, zone_num)
+        min_humidity_threshold = zone_cfg.get("minHumidity", cfg.HUMIDITY_ALERT)
+
         _control_valve_auto(uid, zone_num, humidity)
         _check_thresholds_and_notify(
             uid=uid,
             zone_num=zone_num,
             humidity=humidity,
+            temperature=temperature,
             ph=ph,
             ec=ec,
             n=n,
@@ -721,7 +741,8 @@ def on_message(client, userdata, msg):
             k=k,
         )
 
-        if humidity < cfg.HUMIDITY_ALERT:
+        # Utilisation du seuil configuré par l'admin au lieu du hardcodé
+        if humidity < min_humidity_threshold:
             send_critical_alert(db, uid, zone_num, humidity)
 
         if predict_stress_risk(db, uid, zone_num, humidity):
