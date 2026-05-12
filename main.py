@@ -28,9 +28,22 @@ if not cfg.GROQ_API_KEY:
     sys.exit(1)
 
 # ── Firebase ─────────────────────────────────────────────────────────────────
-firebase_json = json.loads(os.getenv("FIREBASE_CREDENTIALS"))
-cred = credentials.Certificate(firebase_json)
 import firebase_admin
+
+# Priorité : fichier local serviceAccountKey.json, sinon variable d'env
+key_path = "serviceAccountKey.json"
+if os.path.exists(key_path):
+    logger.info("Chargement des credentials Firebase depuis %s", key_path)
+    cred = credentials.Certificate(key_path)
+else:
+    env_creds = os.getenv("FIREBASE_CREDENTIALS")
+    if env_creds:
+        logger.info("Chargement des credentials Firebase depuis FIREBASE_CREDENTIALS")
+        firebase_json = json.loads(env_creds)
+        cred = credentials.Certificate(firebase_json)
+    else:
+        logger.critical("Credentials Firebase manquants ! (serviceAccountKey.json ou FIREBASE_CREDENTIALS)")
+        sys.exit(1)
 
 firebase_admin.initialize_app(cred)
 db = firestore.client()

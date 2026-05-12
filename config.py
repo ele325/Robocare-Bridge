@@ -13,7 +13,7 @@ GROQ_TEMPERATURE = 0.3
 GROQ_MAX_RETRIES = 3
 
 # ── MQTT ────────────────────────────────────────────────────────────────────
-MQTT_BROKER     = os.environ.get("MQTT_BROKER", "broker.hivemq.com")
+MQTT_BROKER     = os.environ.get("MQTT_BROKER", "80.75.212.179")
 MQTT_PORT       = int(os.environ.get("MQTT_PORT", 1883))
 MQTT_USER       = ""   # ✅ pas d'auth sur Mosquitto
 MQTT_PASSWORD   = ""   # ✅ pas d'auth sur Mosquitto

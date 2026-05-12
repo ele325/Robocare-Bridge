@@ -17,10 +17,12 @@ logger = get_logger("robocare.services.notifications")
 def send_critical_alert(db, uid: str, zone_num: str | int, humidity: float) -> None:
     """Alerte immédiate humidité critique (< seuil)."""
     topic   = "user_{}".format(uid)
+    body = "Humidité critique détectée : {:.1f}%. L'irrigation a été activée. Vous pouvez consulter l'assistant IA pour obtenir des conseils.".format(humidity)
+    
     message = messaging.Message(
         notification=messaging.Notification(
-            title="🔴 Alerte Zone {}".format(zone_num),
-            body="Humidité critique : {:.1f}%. Irrigation activée.".format(humidity),
+            title="🔴 Alerte Critique Zone {}".format(zone_num),
+            body=body,
         ),
         data={"zone": str(zone_num), "click_action": "FLUTTER_NOTIFICATION_CLICK"},
         topic=topic,
@@ -32,6 +34,8 @@ def send_critical_alert(db, uid: str, zone_num: str | int, humidity: float) -> N
         "level":     "critique",
         "zone_num":  str(zone_num),
         "humidity":  round(humidity, 1),
+        "title":     "Alerte Humidité Critique",
+        "message":   body,
         "timestamp": firestore.SERVER_TIMESTAMP,
     })
     logger.info("Notification critique envoyée — UID: %s Zone: %s H: %.1f%%", uid, zone_num, humidity)
@@ -183,7 +187,7 @@ def send_thresholds_summary_alert(
     if issue_count > max_lines:
         extra = "\n• +{} autre(s) paramètre(s)".format(issue_count - max_lines)
 
-    body = "{} paramètre(s) hors plage\n{}{}\nConseil: vérifier irrigation et nutriments.".format(
+    body = "{} paramètre(s) hors plage : \n{}\n{}\nVous pouvez consulter l'assistant IA pour une analyse détaillée.".format(
         issue_count,
         "\n".join(details),
         extra,
@@ -211,6 +215,8 @@ def send_thresholds_summary_alert(
         "level": severity,
         "zone_num": str(zone_num),
         "plant_type": plant_label,
+        "title": "Alerte Seuils - {}".format(plant_label),
+        "message": body,
         "issues_count": issue_count,
         "issues": issues,
         "timestamp": firestore.SERVER_TIMESTAMP,
@@ -256,6 +262,8 @@ def send_auto_irrigation_started_alert(
         "type": "auto_irrigation_started",
         "level": "info",
         "zone_num": str(zone_num),
+        "title": "Irrigation Automatique",
+        "message": "Humidité ({:.1f}%) sous le seuil ({:.1f}%).".format(humidity, min_humidity),
         "humidity": round(humidity, 1),
         "min_humidity": round(min_humidity, 1),
         "timestamp": firestore.SERVER_TIMESTAMP,
