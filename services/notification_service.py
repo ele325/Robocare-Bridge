@@ -278,10 +278,12 @@ def send_auto_irrigation_started_alert(
 def send_irrigation_finished_alert(db, uid: str, zone_num: str | int) -> None:
     """Notification quand l'arrosage temporisé est terminé."""
     topic = "user_{}".format(uid)
+    body = "L'arrosage de la zone {} est fini. La pompe est maintenant fermée.".format(zone_num)
+    
     message = messaging.Message(
         notification=messaging.Notification(
             title="✅ Arrosage Terminé - Zone {}".format(zone_num),
-            body="L'arrosage de la zone {} est fini. La pompe est maintenant fermée.".format(zone_num),
+            body=body,
         ),
         data={
             "zone": str(zone_num),
@@ -298,6 +300,17 @@ def send_irrigation_finished_alert(db, uid: str, zone_num: str | int) -> None:
         topic=topic,
     )
     messaging.send(message)
+
+    # Sauvegarde dans Firestore pour l'historique
+    db.collection("users").document(uid).collection("alerts").add({
+        "type":      "irrigation_finished",
+        "level":     "info",
+        "zone_num":  str(zone_num),
+        "title":     "Irrigation Terminée",
+        "message":   body,
+        "timestamp": firestore.SERVER_TIMESTAMP,
+    })
+    
     logger.info("Notification FINISHED envoyée — UID: %s Zone: %s", uid, zone_num)
 
 
@@ -305,10 +318,12 @@ def send_irrigation_finished_alert(db, uid: str, zone_num: str | int) -> None:
 def send_sensor_failure_alert(db, uid: str, zone_num: str | int, sensor_id: str) -> None:
     """Notification quand un capteur tombe en panne (stale)."""
     topic = "user_{}".format(uid)
+    body = "Le capteur {} n'a pas envoyé de données depuis plus de 4h. Veuillez vérifier l'installation ou la batterie.".format(sensor_id)
+    
     message = messaging.Message(
         notification=messaging.Notification(
             title="⚠️ Panne Capteur - Zone {}".format(zone_num),
-            body="Le capteur {} n'a pas envoyé de données depuis plus de 4h. Veuillez vérifier l'installation ou la batterie.".format(sensor_id),
+            body=body,
         ),
         data={
             "zone": str(zone_num),
@@ -325,6 +340,17 @@ def send_sensor_failure_alert(db, uid: str, zone_num: str | int, sensor_id: str)
         topic=topic,
     )
     messaging.send(message)
+
+    # Sauvegarde dans Firestore pour l'historique
+    db.collection("users").document(uid).collection("alerts").add({
+        "type":      "sensor_failure",
+        "level":     "warning",
+        "zone_num":  str(zone_num),
+        "title":     "Panne Capteur",
+        "message":   body,
+        "timestamp": firestore.SERVER_TIMESTAMP,
+    })
+
     logger.info("Notification PANNE envoyée — UID: %s Zone: %s Sensor: %s", uid, zone_num, sensor_id)
 
 
@@ -332,10 +358,12 @@ def send_sensor_failure_alert(db, uid: str, zone_num: str | int, sensor_id: str)
 def send_pump_forgotten_alert(db, uid: str, zone_num: str | int, minutes: int) -> None:
     """Alerte quand la pompe tourne en manuel depuis trop longtemps."""
     topic = "user_{}".format(uid)
+    body = "La pompe de la zone {} tourne depuis {} minutes. N'oubliez pas de la fermer si nécessaire.".format(zone_num, minutes)
+    
     message = messaging.Message(
         notification=messaging.Notification(
             title="⚠️ Rappel : Pompe Allumée - Zone {}".format(zone_num),
-            body="La pompe de la zone {} tourne depuis {} minutes. N'oubliez pas de la fermer si nécessaire.".format(zone_num, minutes),
+            body=body,
         ),
         data={
             "zone": str(zone_num),
@@ -352,4 +380,15 @@ def send_pump_forgotten_alert(db, uid: str, zone_num: str | int, minutes: int) -
         topic=topic,
     )
     messaging.send(message)
+
+    # Sauvegarde dans Firestore pour l'historique
+    db.collection("users").document(uid).collection("alerts").add({
+        "type":      "pump_reminder",
+        "level":     "warning",
+        "zone_num":  str(zone_num),
+        "title":     "Rappel Pompe Allumée",
+        "message":   body,
+        "timestamp": firestore.SERVER_TIMESTAMP,
+    })
+
     logger.info("Notification OUBLI POMPE envoyée — UID: %s Zone: %s Duration: %d min", uid, zone_num, minutes)
