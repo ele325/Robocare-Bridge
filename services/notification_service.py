@@ -171,9 +171,8 @@ def send_thresholds_summary_alert(
     plant_label = (plant_type or "Plante").strip()
     title = "{} Zone {} — Alerte {}".format(badge, zone_num, plant_label)
 
-    max_lines = 2
     details = []
-    for issue in issues[:max_lines]:
+    for issue in issues:
         field = str(issue.get("field", "")).upper()
         value = float(issue.get("value", 0.0))
         minimum = float(issue.get("min", 0.0))
@@ -183,14 +182,9 @@ def send_thresholds_summary_alert(
         else:
             details.append("• {}: {:.1f} (max {:.1f})".format(field, value, maximum))
 
-    extra = ""
-    if issue_count > max_lines:
-        extra = "\n• +{} autre(s) paramètre(s)".format(issue_count - max_lines)
-
-    body = "{} paramètre(s) hors plage : \n{}\n{}\nVous pouvez consulter l'assistant IA pour une analyse détaillée.".format(
+    body = "{} paramètre(s) hors plage : \n{}\n\nVous pouvez consulter l'assistant IA pour une analyse détaillée.".format(
         issue_count,
         "\n".join(details),
-        extra,
     )
 
     message = messaging.Message(
